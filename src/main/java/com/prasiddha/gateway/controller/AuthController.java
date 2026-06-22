@@ -1,0 +1,70 @@
+package com.prasiddha.gateway.controller;
+
+import com.prasiddha.gateway.model.entity.GatewayUser;
+import com.prasiddha.gateway.repository.UserRepository;
+import com.prasiddha.gateway.security.JwtUtil;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import lombok.Data;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.authentication.*;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.Instant;
+import java.util.Map;
+
+@Slf4j
+@RestController
+@RequestMapping("/api/v1/auth")
+@RequiredArgsConstructor
+@Tag(name = "Authentication")
+public class AuthController {
+
+    private final AuthenticationManager authManager;
+    private final JwtUtil jwtUtil;
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+
+    @PostMapping("/register")
+    @Operation(summary = "Register a new user")
+    public ResponseEntity<?> register(@Valid @RequestBody RegisterRequest req) {
+        if (userRepository.existsByUsername(req.getUsername())) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Username already taken"));
+        }
+        GatewayUser user = GatewayUser.builder()
+            .username(req.getUsername())
+            .passwordHash(passwordEncoder.encode(req.getPassword()))
+            .role(GatewayUser.Role.USER)
+            .build();
+        userRepository.save(user);
+        log.info("Registered user: {}", req.getUsername());
+        return ResponseEntity.ok(Map.of("message", "Registered successfully", "username", user.getUsername()));
+    }
+
+    @PostMapping("/token")
+    @Operation(summary = "Login — returns a JWT token")
+    public ResponseEntity<?> token(@Valid @RequestBody LoginRequest req) {
+        authManager.authenticate(new UsernamePasswordAuthenticationToken(req.getUsername(), req.getPassword()));
+        GatewayUser user = userRepository.findByUsername(req.getUsername()).orElseThrow();
+        user.setLastLoginAt(Instant.now());
+        userRepository.save(user);
+        String token = jwtUtil.generateToken(user.getUsername(), user.getRole().name());
+        log.info("JWT issued for: {}", user.getUsername());
+        return ResponseEntity.ok(Map.of("token", token, "type", "Bearer", "expiresIn", "86400s"));
+    }
+
+    @Data public static class RegisterRequest {
+        @NotBlank private String username;
+        @NotBlank private String password;
+    }
+
+    @Data public static class LoginRequest {
+        @NotBlank private String username;
+        @NotBlank private String password;
+    }
+}

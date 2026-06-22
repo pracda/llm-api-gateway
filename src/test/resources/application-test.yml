@@ -1,0 +1,62 @@
+spring:
+  config:
+    activate:
+      on-profile: test
+
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    database-platform: org.hibernate.dialect.H2Dialect
+    show-sql: true
+
+  # Disable Redis for unit tests — integration tests use Testcontainers
+  data:
+    redis:
+      host: localhost
+      port: 16379     # intentionally unreachable — mock in tests
+
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+
+app:
+  jwt:
+    secret: test-secret-key-must-be-at-least-32-characters-long-for-hs256
+    expiration-ms: 3600000
+
+  rate-limit:
+    requests-per-minute: 1000
+    requests-per-day: 100000
+    global-requests-per-minute: 10000
+
+  security:
+    input:
+      injection-detection-enabled: true
+      block-on-detection: true
+    output:
+      sanitisation-enabled: true
+      block-on-unsafe-output: true
+      max-response-length: 10000
+
+  llm:
+    openai:
+      api-key: test-openai-key
+      default-model: gpt-4o-mini
+      timeout-seconds: 5
+    anthropic:
+      api-key: test-anthropic-key
+      base-url: https://api.anthropic.com
+      api-version: "2023-06-01"
+      default-model: claude-3-haiku-20240307
+      timeout-seconds: 5
+
+logging:
+  level:
+    com.prasiddha.gateway: DEBUG

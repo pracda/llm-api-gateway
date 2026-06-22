@@ -1,0 +1,135 @@
+# ── Default (local dev) ──────────────────────────────────────────────────────
+spring:
+  application:
+    name: llm-api-gateway
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/llmgateway
+    username: gateway
+    password: gateway_secret
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: redis_secret
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 8
+          min-idle: 2
+
+  # Thread pool for @Async audit logging
+  task:
+    execution:
+      pool:
+        core-size: 4
+        max-size: 16
+        queue-capacity: 200
+      thread-name-prefix: audit-async-
+
+server:
+  port: 8080
+  error:
+    include-message: never
+    include-stacktrace: never
+    include-binding-errors: never
+
+# ── App-specific config ────────────────────────────────────────────────────
+app:
+  jwt:
+    secret: ${JWT_SECRET:local-dev-secret-at-least-32-characters-long}
+    expiration-ms: 86400000        # 24 hours
+
+  llm:
+    openai:
+      api-key: ${OPENAI_API_KEY:}
+      default-model: gpt-4o-mini
+      timeout-seconds: 30
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:}
+      base-url: https://api.anthropic.com
+      api-version: "2023-06-01"
+      default-model: claude-3-haiku-20240307
+      timeout-seconds: 30
+
+  rate-limit:
+    requests-per-minute: 20
+    requests-per-day: 500
+    global-requests-per-minute: 200
+
+  security:
+    input:
+      injection-detection-enabled: true
+      block-on-detection: true          # false = log only (for testing)
+    output:
+      sanitisation-enabled: true
+      block-on-unsafe-output: true      # false = log and strip only
+      max-response-length: 10000        # chars — responses above this are truncated
+
+# ── Actuator ──────────────────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+# ── Swagger UI ────────────────────────────────────────────────────────────
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui
+    operations-sorter: method
+    tags-sorter: alpha
+
+# ── Logging ───────────────────────────────────────────────────────────────
+logging:
+  level:
+    com.prasiddha.gateway: DEBUG
+    org.springframework.security: INFO
+  pattern:
+    console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{30} - %msg%n"
+
+---
+# ── Production profile ─────────────────────────────────────────────────────
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      password: ${SPRING_DATA_REDIS_PASSWORD}
+
+logging:
+  level:
+    com.prasiddha.gateway: INFO
+    org.springframework.security: WARN
