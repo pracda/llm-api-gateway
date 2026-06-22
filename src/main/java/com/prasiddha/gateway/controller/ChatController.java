@@ -12,6 +12,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
@@ -21,12 +22,13 @@ import java.util.Map;
 /**
  * Primary gateway endpoint.
  *
- * Security pipeline per request:
- *   1. JWT auth     (Spring Security filter)
- *   2. Input scan   (InputScanService)   ← OWASP LLM #01
- *   3. LLM call     (LlmProxyService → OpenAI or Anthropic)
- *   4. Output scan  (OutputScanService)  ← OWASP LLM #05
- *   5. Audit log    (AuditService — async)
+ * Full security pipeline per request:
+ *   1. JWT auth      (Spring Security filter)
+ *   2. Rate limit    (RateLimitService → Redis)
+ *   3. Input scan    (InputScanService)   ← OWASP LLM #01
+ *   4. LLM call      (LlmProxyService → OpenAI or Anthropic)
+ *   5. Output scan   (OutputScanService)  ← OWASP LLM #05
+ *   6. Audit log     (AuditService — async)
  */
 @Slf4j
 @RestController
@@ -35,10 +37,11 @@ import java.util.Map;
 @Tag(name = "Chat Gateway")
 public class ChatController {
 
-    private final InputScanService inputScan;
+    private final InputScanService  inputScan;
     private final OutputScanService outputScan;
-    private final AuditService auditService;
-    private final LlmProxyService llmProxy;
+    private final AuditService      auditService;
+    private final LlmProxyService   llmProxy;
+    private final RateLimitService  rateLimitService;
 
     @PostMapping("/chat")
     @Operation(
@@ -52,7 +55,21 @@ public class ChatController {
         long start = System.currentTimeMillis();
         log.info("Chat — user='{}' provider={}", username, request.getProvider());
 
-        // ── 1. Input scan ──────────────────────────────────────────────
+        // ── 1. Rate limit check ────────────────────────────────────────
+        RateLimitService.RateLimitResult rateResult = rateLimitService.checkLimit(username);
+        if (!rateResult.isAllowed()) {
+            auditService.log(buildAudit(username, request,
+                AuditLog.Outcome.BLOCKED_RATE_LIMIT,
+                "Rate limit exceeded: " + rateResult.limitType(),
+                0, 0, elapsed(start), 429));
+
+            return ResponseEntity.status(429)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(rateResult.retryAfterSeconds()))
+                .header("X-RateLimit-LimitType", rateResult.limitType())
+                .build();
+        }
+
+        // ── 2. Input scan ──────────────────────────────────────────────
         InputScanService.ScanResult inputResult =
             inputScan.scan(request.getUserMessage(), request.getSystemPrompt());
 
@@ -63,10 +80,10 @@ public class ChatController {
             throw GatewayException.injectionDetected();
         }
 
-        // ── 2. Real LLM call ───────────────────────────────────────────
+        // ── 3. Real LLM call ───────────────────────────────────────────
         ChatResponse llmResponse = llmProxy.chat(request);
 
-        // ── 3. Output scan ─────────────────────────────────────────────
+        // ── 4. Output scan ─────────────────────────────────────────────
         OutputScanService.ScanResult outputResult =
             outputScan.scan(llmResponse.getContent());
 
@@ -80,14 +97,13 @@ public class ChatController {
             throw GatewayException.unsafeOutput();
         }
 
-        // ── 4. Audit log (async) ───────────────────────────────────────
+        // ── 5. Audit log (async — never blocks response) ───────────────
         auditService.log(buildAudit(username, request,
             AuditLog.Outcome.SUCCESS, null,
             llmResponse.getUsage().getPromptTokens(),
             llmResponse.getUsage().getCompletionTokens(),
             elapsed(start), 200));
 
-        // If output was sanitised, update content and flag it
         ChatResponse finalResponse = outputResult.isSanitised()
             ? ChatResponse.builder()
                 .requestId(llmResponse.getRequestId())
@@ -100,7 +116,10 @@ public class ChatController {
                 .build()
             : llmResponse;
 
-        return ResponseEntity.ok(finalResponse);
+        // Add rate limit headers to every successful response
+        return ResponseEntity.ok()
+            .header("X-RateLimit-Remaining", String.valueOf(rateResult.remainingTokens()))
+            .body(finalResponse);
     }
 
     @GetMapping("/health")
@@ -109,8 +128,6 @@ public class ChatController {
     public ResponseEntity<?> health(@AuthenticationPrincipal String username) {
         return ResponseEntity.ok(Map.of("status", "UP", "user", username));
     }
-
-    // ── Helpers ───────────────────────────────────────────────────────────
 
     private AuditLog buildAudit(
         String userId, ChatRequest req, AuditLog.Outcome outcome,
