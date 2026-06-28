@@ -1,0 +1,15 @@
+﻿.git
+.github
+*.md
+.env
+.env.example
+docker/
+target/
+.gitignore
+*.zip
+*.sh
+mvnw
+mvnw.cmd
+.mvn/
+**/.mvn/
+*.bat
