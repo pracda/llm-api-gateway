@@ -44,4 +44,19 @@ public interface AuditLogRepository extends JpaRepository<AuditLog, String> {
 
     @Query("SELECT SUM(a.promptTokens + a.completionTokens) FROM AuditLog a WHERE a.userId = :userId AND a.createdAt > :since")
     Long sumTokensByUserAndPeriod(@Param("userId") String userId, @Param("since") Instant since);
+
+    long countByApiKeyId(String apiKeyId);
+
+    @Query("SELECT SUM(a.promptTokens + a.completionTokens) FROM AuditLog a WHERE a.apiKeyId = :apiKeyId")
+    Long sumTokensByApiKeyId(@Param("apiKeyId") String apiKeyId);
+
+    @Query("SELECT a.userId, COUNT(a) FROM AuditLog a WHERE a.createdAt > :since " +
+           "AND a.outcome IN ('BLOCKED_INPUT_INJECTION', 'BLOCKED_OUTPUT_UNSAFE') GROUP BY a.userId")
+    List<Object[]> countBlockedByUserLast24h(@Param("since") Instant since);
+
+    @Query("SELECT COUNT(DISTINCT a.ipAddress) FROM AuditLog a WHERE a.userId = :userId AND a.createdAt > :since")
+    long countDistinctIpsByUserAndPeriod(@Param("userId") String userId, @Param("since") Instant since);
+
+    @Query("SELECT a.createdAt FROM AuditLog a WHERE a.createdAt > :since AND a.outcome <> 'SUCCESS' ORDER BY a.createdAt")
+    List<Instant> findBlockedTimestampsAfter(@Param("since") Instant since);
 }

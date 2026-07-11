@@ -33,6 +33,11 @@ public class JwtAuthFilter extends OncePerRequestFilter {
     ) throws ServletException, IOException {
 
         String token = extractBearer(req);
+        if (!StringUtils.hasText(token) && "/api/v1/admin/stream".equals(req.getRequestURI())) {
+            // Browsers' native EventSource can't set an Authorization header — this is the
+            // standard, narrow workaround, deliberately scoped to this exact SSE path only.
+            token = req.getParameter("token");
+        }
 
         if (StringUtils.hasText(token) && jwtUtil.validateToken(token)) {
             String username = jwtUtil.extractUsername(token);
@@ -55,5 +60,19 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         String header = req.getHeader("Authorization");
         return (StringUtils.hasText(header) && header.startsWith("Bearer "))
             ? header.substring(7) : null;
+    }
+
+    /**
+     * SseEmitter responses (admin live-stream, /chat/stream) trigger an ASYNC
+     * dispatch to finalize the response once the emitter completes. OncePerRequestFilter
+     * skips ASYNC dispatches by default, so without this override the SecurityContext set
+     * during the original REQUEST dispatch is gone by the time AuthorizationFilter re-checks
+     * on that completion pass, and it denies it — harmless to the already-sent data, but it
+     * throws a server-side AccessDeniedException on every streaming call. Re-running this
+     * filter (idempotent — same header, same request) keeps the context populated for that pass.
+     */
+    @Override
+    protected boolean shouldNotFilterAsyncDispatch() {
+        return false;
     }
 }

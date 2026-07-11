@@ -12,7 +12,7 @@ class OutputScanServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new OutputScanService();
+        service = new OutputScanService(new CanaryTokenProvider(""));
         ReflectionTestUtils.setField(service, "enabled", true);
         ReflectionTestUtils.setField(service, "blockOnUnsafe", true);
         ReflectionTestUtils.setField(service, "maxResponseLength", 10000);

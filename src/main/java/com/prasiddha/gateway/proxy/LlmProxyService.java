@@ -6,6 +6,7 @@ import com.prasiddha.gateway.model.response.ChatResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 
 import java.util.List;
 import java.util.Map;
@@ -28,12 +29,23 @@ public class LlmProxyService {
         log.info("LlmProxyService ready — providers: {}", providers.keySet());
     }
 
-    public ChatResponse chat(ChatRequest request) {
+    public ChatResponse chat(ChatRequest request, int maxTokens) {
+        LlmProvider provider = resolve(request);
+        log.info("Routing to: {}", request.getProvider());
+        return provider.chat(request, maxTokens);
+    }
+
+    public Flux<LlmProvider.StreamChunk> streamChat(ChatRequest request, int maxTokens) {
+        LlmProvider provider = resolve(request);
+        log.info("Routing stream to: {}", request.getProvider());
+        return provider.streamChat(request, maxTokens);
+    }
+
+    private LlmProvider resolve(ChatRequest request) {
         LlmProvider provider = providers.get(request.getProvider());
         if (provider == null) {
             throw new GatewayException("Unsupported provider: " + request.getProvider(), HttpStatus.BAD_REQUEST);
         }
-        log.info("Routing to: {}", request.getProvider());
-        return provider.chat(request);
+        return provider;
     }
 }

@@ -33,6 +33,9 @@ public class RateLimitService {
     @Value("${app.rate-limit.requests-per-day}")
     private int requestsPerDay;
 
+    @Value("${app.rate-limit.global-requests-per-minute}")
+    private int globalRequestsPerMinute;
+
     private final StringRedisTemplate redis;
 
     public RateLimitService(StringRedisTemplate redis) {
@@ -41,7 +44,17 @@ public class RateLimitService {
 
     public RateLimitResult checkLimit(String userId) {
         try {
-            // Check per-minute limit first
+            // Check global (cross-user) limit first
+            RateLimitResult globalResult = checkWindow(
+                "rate:global:minute",
+                globalRequestsPerMinute,
+                60L,
+                TimeUnit.SECONDS,
+                "global"
+            );
+            if (!globalResult.isAllowed()) return globalResult;
+
+            // Check per-minute limit next
             RateLimitResult minuteResult = checkWindow(
                 "rate:minute:" + userId,
                 requestsPerMinute,

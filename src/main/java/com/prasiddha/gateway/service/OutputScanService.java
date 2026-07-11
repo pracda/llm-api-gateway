@@ -1,9 +1,11 @@
 package com.prasiddha.gateway.service;
 
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -13,15 +15,19 @@ import java.util.regex.Pattern;
  * Covers OWASP LLM Top 10 #05 — Improper Output Handling.
  *
  * Checks:
- *   1. PII patterns — emails, phone numbers, SSNs, credit card numbers
- *   2. Secret / credential leakage — API keys, tokens, passwords
- *   3. Malicious content — XSS payloads, script injection, SQL injection
- *   4. Sensitive data disclosure — system prompt echo, internal paths
- *   5. Excessive length — truncate responses above configured limit
+ *   1. Canary token — confirms whether the hardened system prompt leaked (OWASP LLM #06)
+ *   2. PII patterns — emails, phone numbers, SSNs, credit card numbers
+ *   3. Secret / credential leakage — API keys, tokens, passwords
+ *   4. Malicious content — XSS payloads, script injection, SQL injection
+ *   5. Competitor mentions — visibility only, never blocks
+ *   6. Excessive length — truncate responses above configured limit
  */
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class OutputScanService {
+
+    private final CanaryTokenProvider canaryTokenProvider;
 
     @Value("${app.security.output.sanitisation-enabled}")
     private boolean enabled;
@@ -31,6 +37,9 @@ public class OutputScanService {
 
     @Value("${app.security.output.max-response-length}")
     private int maxResponseLength;
+
+    @Value("${app.security.competitor-keywords}")
+    private String competitorKeywordsCsv;
 
     // ── Patterns that should BLOCK (dangerous — never return to client) ────
 
@@ -53,42 +62,6 @@ public class OutputScanService {
         Pattern.compile("(?i)(api[_-]?key|bearer)[\"'\\s:=]+[a-zA-Z0-9\\-_]{20,}")
     );
 
-    // ── Patterns that should be REDACTED (sanitise and continue) ──────────
-
-    private static final List<PatternReplacement> REDACT_PATTERNS = List.of(
-
-        // Email addresses
-        new PatternReplacement(
-            Pattern.compile("[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}"),
-            "[EMAIL REDACTED]"
-        ),
-        // Phone numbers (US and international)
-        new PatternReplacement(
-            Pattern.compile("(\\+?1[\\s.-]?)?\\(?[0-9]{3}\\)?[\\s.-]?[0-9]{3}[\\s.-]?[0-9]{4}"),
-            "[PHONE REDACTED]"
-        ),
-        // SSN
-        new PatternReplacement(
-            Pattern.compile("\\b[0-9]{3}-[0-9]{2}-[0-9]{4}\\b"),
-            "[SSN REDACTED]"
-        ),
-        // Credit card numbers (basic Luhn-format)
-        new PatternReplacement(
-            Pattern.compile("\\b[0-9]{4}[\\s-]?[0-9]{4}[\\s-]?[0-9]{4}[\\s-]?[0-9]{4}\\b"),
-            "[CARD REDACTED]"
-        ),
-        // IPv4 addresses (internal ranges)
-        new PatternReplacement(
-            Pattern.compile("\\b(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)([0-9]{1,3}\\.){1}[0-9]{1,3}\\b"),
-            "[INTERNAL-IP REDACTED]"
-        ),
-        // Windows/Unix internal paths
-        new PatternReplacement(
-            Pattern.compile("(C:\\\\[\\w\\\\]+|/home/[\\w/]+|/var/[\\w/]+|/etc/[\\w/]+)"),
-            "[PATH REDACTED]"
-        )
-    );
-
     // ── Public API ────────────────────────────────────────────────────────
 
     public ScanResult scan(String llmOutput) {
@@ -96,7 +69,14 @@ public class OutputScanService {
             return ScanResult.safe(llmOutput);
         }
 
-        // 1. Check for hard-block patterns
+        // 1. Canary token — confirmed system-prompt leak, always a hard block regardless of blockOnUnsafe
+        String canary = canaryTokenProvider.get();
+        if (llmOutput.contains(canary)) {
+            log.error("OUTPUT SCAN — canary token detected in output! System prompt leak confirmed.");
+            return ScanResult.leaked("System prompt leak detected (canary token present in output)");
+        }
+
+        // 2. Check for hard-block patterns
         for (Pattern pattern : BLOCK_PATTERNS) {
             if (pattern.matcher(llmOutput).find()) {
                 String reason = "Unsafe content detected in LLM output: " + describePattern(pattern);
@@ -104,15 +84,15 @@ public class OutputScanService {
                     pattern.pattern(), preview(llmOutput));
                 return blockOnUnsafe
                     ? ScanResult.blocked(reason)
-                    : ScanResult.sanitised("[Content blocked by security policy]", reason);
+                    : ScanResult.sanitised("[Content blocked by security policy]", reason, false);
             }
         }
 
-        // 2. Redact PII and sensitive data
+        // 3. Redact PII and sensitive data
         String sanitised = llmOutput;
         boolean wasRedacted = false;
 
-        for (PatternReplacement pr : REDACT_PATTERNS) {
+        for (PiiPatterns.Redaction pr : PiiPatterns.PATTERNS) {
             Matcher m = pr.pattern().matcher(sanitised);
             if (m.find()) {
                 sanitised = m.replaceAll(pr.replacement());
@@ -122,7 +102,17 @@ public class OutputScanService {
             }
         }
 
-        // 3. Enforce maximum length
+        // 4. Competitor mentions — visibility only, never blocks or redacts
+        boolean competitorMentioned = false;
+        for (String keyword : competitorKeywords()) {
+            if (!keyword.isBlank() && sanitised.toLowerCase().contains(keyword.trim().toLowerCase())) {
+                competitorMentioned = true;
+                log.info("OUTPUT SCAN — competitor mention detected: '{}'", keyword.trim());
+                break;
+            }
+        }
+
+        // 5. Enforce maximum length
         if (sanitised.length() > maxResponseLength) {
             log.info("OUTPUT SCAN TRUNCATED — length={} max={}", sanitised.length(), maxResponseLength);
             sanitised = sanitised.substring(0, maxResponseLength)
@@ -130,9 +120,18 @@ public class OutputScanService {
             wasRedacted = true;
         }
 
-        return wasRedacted
-            ? ScanResult.sanitised(sanitised, "PII/sensitive data redacted")
+        if (wasRedacted) {
+            return ScanResult.sanitised(sanitised, "PII/sensitive data redacted", competitorMentioned);
+        }
+        return competitorMentioned
+            ? ScanResult.safeWithCompetitorMention(sanitised)
             : ScanResult.safe(sanitised);
+    }
+
+    private List<String> competitorKeywords() {
+        return competitorKeywordsCsv == null || competitorKeywordsCsv.isBlank()
+            ? List.of()
+            : Arrays.asList(competitorKeywordsCsv.split(","));
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
@@ -152,25 +151,31 @@ public class OutputScanService {
 
     // ── Types ─────────────────────────────────────────────────────────────
 
-    private record PatternReplacement(Pattern pattern, String replacement) {}
-
     public record ScanResult(
         Status status,
         String content,   // sanitised or null if blocked
-        String reason
+        String reason,
+        boolean promptLeakDetected,
+        boolean competitorMentioned
     ) {
         public boolean isSafe()      { return status == Status.SAFE; }
         public boolean isSanitised() { return status == Status.SANITISED; }
         public boolean isBlocked()   { return status == Status.BLOCKED; }
 
         static ScanResult safe(String content) {
-            return new ScanResult(Status.SAFE, content, null);
+            return new ScanResult(Status.SAFE, content, null, false, false);
         }
-        static ScanResult sanitised(String content, String reason) {
-            return new ScanResult(Status.SANITISED, content, reason);
+        static ScanResult safeWithCompetitorMention(String content) {
+            return new ScanResult(Status.SAFE, content, null, false, true);
+        }
+        static ScanResult sanitised(String content, String reason, boolean competitorMentioned) {
+            return new ScanResult(Status.SANITISED, content, reason, false, competitorMentioned);
         }
         static ScanResult blocked(String reason) {
-            return new ScanResult(Status.BLOCKED, null, reason);
+            return new ScanResult(Status.BLOCKED, null, reason, false, false);
+        }
+        static ScanResult leaked(String reason) {
+            return new ScanResult(Status.BLOCKED, null, reason, true, false);
         }
 
         public enum Status { SAFE, SANITISED, BLOCKED }

@@ -28,13 +28,17 @@ public class InputScanService {
     @Value("${app.security.input.block-on-detection}")
     private boolean blockOnDetection;
 
+    /** REDACT or BLOCK when PII is found in the user's prompt, before it's ever sent to the LLM. */
+    @Value("${app.security.input.pii-action}")
+    private String piiAction;
+
     // ── Injection patterns ────────────────────────────────────────────────
 
     private static final List<Pattern> INJECTION_PATTERNS = List.of(
 
         // Instruction override
-        Pattern.compile("ignore (all |previous |prior |above |the )?(instructions?|prompts?|directives?|rules?|constraints?)", Pattern.CASE_INSENSITIVE),
-        Pattern.compile("disregard (all |previous |prior |above |the )?(instructions?|prompts?|directives?|rules?)", Pattern.CASE_INSENSITIVE),
+        Pattern.compile("ignore (all |previous |prior |above |the )*(instructions?|prompts?|directives?|rules?|constraints?)", Pattern.CASE_INSENSITIVE),
+        Pattern.compile("disregard (all |previous |prior |above |the )*(instructions?|prompts?|directives?|rules?)", Pattern.CASE_INSENSITIVE),
         Pattern.compile("forget (all |everything|your|previous|prior)", Pattern.CASE_INSENSITIVE),
         Pattern.compile("override (your |the |all )?(instructions?|system|rules?|constraints?)", Pattern.CASE_INSENSITIVE),
 
@@ -68,58 +72,99 @@ public class InputScanService {
 
     // ── Public API ────────────────────────────────────────────────────────
 
+    /**
+     * Scans the prompt for injection signals AND computes a 0-100 heuristic
+     * jailbreak risk score, logged on every request (even passing ones) so
+     * trend lines are visible on the dashboard. NOTE: the score is derived
+     * from the same regex/heuristic signals as the block/allow decision —
+     * it adds observability, not new paraphrase-evasion resistance (that
+     * would need a semantic LLM-based pass, deliberately out of scope here).
+     */
     public ScanResult scan(String userMessage, String systemPrompt) {
         if (!enabled) {
-            return ScanResult.clean();
+            return ScanResult.clean(0);
         }
 
-        // 1. Check for Base64-encoded injection payloads
-        ScanResult base64Result = checkBase64Encoding(userMessage);
-        if (base64Result.isDetected()) return base64Result;
+        int score = 0;
+        String reason = null;
 
-        // 2. Check direct pattern matches
+        // 1. Base64-encoded injection payloads
+        String decodedHit = findBase64InjectionPayload(userMessage);
+        if (decodedHit != null) {
+            reason = "Base64-encoded injection payload detected";
+            score += 40;
+            log.warn("INPUT SCAN — base64 injection, decoded preview='{}'", preview(decodedHit));
+        }
+
+        // 2. Direct pattern matches — tally all hits for the score, keep the first for the reason
+        int patternMatches = 0;
         for (Pattern pattern : INJECTION_PATTERNS) {
             if (pattern.matcher(userMessage).find()) {
-                String reason = "Injection pattern detected: " + pattern.pattern();
-                log.warn("INPUT SCAN BLOCKED — pattern='{}' preview='{}'",
-                    pattern.pattern(), preview(userMessage));
-                return ScanResult.detected(reason, blockOnDetection);
+                patternMatches++;
+                if (reason == null) {
+                    reason = "Injection pattern detected: " + pattern.pattern();
+                }
+                log.warn("INPUT SCAN — pattern='{}' preview='{}'", pattern.pattern(), preview(userMessage));
             }
         }
+        score += Math.min(patternMatches, 3) * 25;
 
-        // 3. Check if user message is trying to override system prompt
+        // 3. System prompt override heuristic
         if (systemPrompt != null && looksLikeSystemPromptOverride(userMessage, systemPrompt)) {
-            String reason = "Possible system prompt override attempt";
-            log.warn("INPUT SCAN BLOCKED — system prompt override attempt");
-            return ScanResult.detected(reason, blockOnDetection);
+            if (reason == null) {
+                reason = "Possible system prompt override attempt";
+            }
+            score += 20;
+            log.warn("INPUT SCAN — possible system prompt override attempt");
         }
 
-        return ScanResult.clean();
+        score = Math.min(score, 100);
+
+        if (reason != null) {
+            log.warn("INPUT SCAN BLOCKED — reason='{}' score={}", reason, score);
+            return ScanResult.detected(reason, blockOnDetection, score);
+        }
+        return ScanResult.clean(score);
+    }
+
+    /** PII detection on the prompt itself, before it's ever sent to the LLM. */
+    public PiiScanResult scanForPii(String userMessage) {
+        for (PiiPatterns.Redaction pr : PiiPatterns.PATTERNS) {
+            if (pr.pattern().matcher(userMessage).find()) {
+                if ("BLOCK".equalsIgnoreCase(piiAction)) {
+                    log.warn("INPUT SCAN BLOCKED — PII detected in prompt (pattern='{}')", pr.pattern().pattern());
+                    return PiiScanResult.blocked("PII detected in prompt");
+                }
+                String redacted = pr.pattern().matcher(userMessage).replaceAll(pr.replacement());
+                for (PiiPatterns.Redaction next : PiiPatterns.PATTERNS) {
+                    redacted = next.pattern().matcher(redacted).replaceAll(next.replacement());
+                }
+                log.info("INPUT SCAN — PII redacted from prompt before sending to LLM");
+                return PiiScanResult.redacted(redacted);
+            }
+        }
+        return PiiScanResult.clean(userMessage);
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
 
-    private ScanResult checkBase64Encoding(String text) {
-        // Look for suspiciously long Base64-looking strings that decode to injection text
+    /** Returns the decoded payload if any Base64-looking chunk decodes to a known injection pattern, else null. */
+    private String findBase64InjectionPayload(String text) {
         String b64Pattern = "[A-Za-z0-9+/]{40,}={0,2}";
         var matcher = Pattern.compile(b64Pattern).matcher(text);
         while (matcher.find()) {
             try {
                 String decoded = new String(Base64.getDecoder().decode(matcher.group()));
-                // Recursively scan the decoded content
                 for (Pattern p : INJECTION_PATTERNS) {
                     if (p.matcher(decoded).find()) {
-                        String reason = "Base64-encoded injection payload detected";
-                        log.warn("INPUT SCAN BLOCKED — base64 injection, decoded preview='{}'",
-                            preview(decoded));
-                        return ScanResult.detected(reason, blockOnDetection);
+                        return decoded;
                     }
                 }
             } catch (IllegalArgumentException ignored) {
                 // Not valid base64 — continue
             }
         }
-        return ScanResult.clean();
+        return null;
     }
 
     private boolean looksLikeSystemPromptOverride(String userMessage, String systemPrompt) {
@@ -134,14 +179,21 @@ public class InputScanService {
         return text.length() > 80 ? text.substring(0, 80) + "..." : text;
     }
 
-    // ── Result type ───────────────────────────────────────────────────────
+    // ── Result types ──────────────────────────────────────────────────────
 
-    public record ScanResult(boolean detected, String reason, boolean shouldBlock) {
-        static ScanResult clean() { return new ScanResult(false, null, false); }
-        static ScanResult detected(String reason, boolean block) {
-            return new ScanResult(true, reason, block);
+    public record ScanResult(boolean detected, String reason, boolean shouldBlock, int jailbreakScore) {
+        static ScanResult clean(int score) { return new ScanResult(false, null, false, score); }
+        static ScanResult detected(String reason, boolean block, int score) {
+            return new ScanResult(true, reason, block, score);
         }
         public boolean isDetected() { return detected; }
         public boolean shouldBlock() { return shouldBlock; }
+    }
+
+    public record PiiScanResult(boolean blocked, String content, String reason) {
+        static PiiScanResult clean(String content) { return new PiiScanResult(false, content, null); }
+        static PiiScanResult redacted(String content) { return new PiiScanResult(false, content, "PII redacted from prompt"); }
+        static PiiScanResult blocked(String reason) { return new PiiScanResult(true, null, reason); }
+        public boolean isBlocked() { return blocked; }
     }
 }

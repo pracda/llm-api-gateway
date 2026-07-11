@@ -2,33 +2,46 @@ package com.prasiddha.gateway.controller;
 
 import com.prasiddha.gateway.exception.GatewayException;
 import com.prasiddha.gateway.model.entity.AuditLog;
+import com.prasiddha.gateway.model.entity.SecurityAlert;
 import com.prasiddha.gateway.model.request.ChatRequest;
 import com.prasiddha.gateway.model.response.ChatResponse;
 import com.prasiddha.gateway.proxy.LlmProxyService;
 import com.prasiddha.gateway.service.*;
+import com.prasiddha.gateway.util.ClientIpResolver;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Primary gateway endpoint.
  *
- * Full security pipeline per request:
- *   1. JWT auth      (Spring Security filter)
- *   2. Rate limit    (RateLimitService → Redis)
- *   3. Input scan    (InputScanService)   ← OWASP LLM #01
- *   4. LLM call      (LlmProxyService → OpenAI or Anthropic)
- *   5. Output scan   (OutputScanService)  ← OWASP LLM #05
- *   6. Audit log     (AuditService — async)
+ * Full security pipeline per request (shared by both /chat and /chat/stream):
+ *   0. IP blocklist + account lockout (ThreatDetectionService)
+ *   1. Rate limit    (RateLimitService → Redis)
+ *   2. Input scan    (InputScanService)   ← OWASP LLM #01 + jailbreak score + input PII
+ *   3. LLM call      (LlmProxyService → OpenAI or Anthropic, token-budget capped)
+ *   4. Output scan   (OutputScanService)  ← OWASP LLM #05 + canary leak + competitor mention
+ *   5. Audit log     (AuditService — async)
+ *
+ * /chat/stream trades away pre-delivery output blocking/redaction: tokens are
+ * forwarded to the caller as they arrive, so step 4 can only run AFTER the full
+ * response has already been sent — it can still alert, auto-revoke, and count
+ * toward the same threshold-based lockouts, just not stop delivery.
  */
 @Slf4j
 @RestController
@@ -37,11 +50,13 @@ import java.util.Map;
 @Tag(name = "Chat Gateway")
 public class ChatController {
 
-    private final InputScanService  inputScan;
-    private final OutputScanService outputScan;
-    private final AuditService      auditService;
-    private final LlmProxyService   llmProxy;
-    private final RateLimitService  rateLimitService;
+    private final InputScanService       inputScan;
+    private final OutputScanService      outputScan;
+    private final AuditService           auditService;
+    private final LlmProxyService        llmProxy;
+    private final RateLimitService       rateLimitService;
+    private final ThreatDetectionService threatDetectionService;
+    private final ApiKeyService          apiKeyService;
 
     @PostMapping("/chat")
     @Operation(
@@ -50,18 +65,43 @@ public class ChatController {
     )
     public ResponseEntity<ChatResponse> chat(
         @Valid @RequestBody ChatRequest request,
-        @AuthenticationPrincipal String username
+        @AuthenticationPrincipal String username,
+        @RequestAttribute(name = "apiKeyId", required = false) String apiKeyId,
+        HttpServletRequest httpRequest
     ) {
         long start = System.currentTimeMillis();
-        log.info("Chat — user='{}' provider={}", username, request.getProvider());
+        String ip  = ClientIpResolver.resolve(httpRequest);
+        log.info("Chat — user='{}' provider={} ip={}", username, request.getProvider(), ip);
+
+        // ── 0. IP blocklist + account lockout ───────────────────────────
+        if (threatDetectionService.isIpBlocked(ip)) {
+            auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
+                AuditLog.Outcome.BLOCKED_AUTH, "IP address blocked by admin",
+                0, 0, elapsed(start), 403, false));
+            return ResponseEntity.status(403).build();
+        }
+
+        if (threatDetectionService.isLocked(username)) {
+            long retryAfter = threatDetectionService.lockoutRemainingSeconds(username);
+            auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
+                AuditLog.Outcome.BLOCKED_AUTH, "Account temporarily locked due to suspicious activity",
+                0, 0, elapsed(start), 423, false));
+            return ResponseEntity.status(HttpStatus.LOCKED)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(retryAfter))
+                .build();
+        }
+
+        threatDetectionService.recordIp(username, ip);
+        threatDetectionService.recordBurst(username); // observability signal only, no lockout
 
         // ── 1. Rate limit check ────────────────────────────────────────
         RateLimitService.RateLimitResult rateResult = rateLimitService.checkLimit(username);
         if (!rateResult.isAllowed()) {
-            auditService.log(buildAudit(username, request,
+            threatDetectionService.recordEvent(username, SecurityAlert.Type.RATE_LIMIT_ABUSE);
+            auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
                 AuditLog.Outcome.BLOCKED_RATE_LIMIT,
                 "Rate limit exceeded: " + rateResult.limitType(),
-                0, 0, elapsed(start), 429));
+                0, 0, elapsed(start), 429, false));
 
             return ResponseEntity.status(429)
                 .header(HttpHeaders.RETRY_AFTER, String.valueOf(rateResult.retryAfterSeconds()))
@@ -69,40 +109,71 @@ public class ChatController {
                 .build();
         }
 
-        // ── 2. Input scan ──────────────────────────────────────────────
+        // ── 2. Input scan (injection detection + jailbreak score) ──────
         InputScanService.ScanResult inputResult =
             inputScan.scan(request.getUserMessage(), request.getSystemPrompt());
 
         if (inputResult.isDetected() && inputResult.shouldBlock()) {
-            auditService.log(buildAudit(username, request,
+            threatDetectionService.recordEvent(username, SecurityAlert.Type.REPEATED_INJECTION);
+            threatDetectionService.recordAttackSignature(inputResult.reason(), username);
+            auditService.log(buildAudit(username, request, apiKeyId, ip, inputResult.jailbreakScore(),
                 AuditLog.Outcome.BLOCKED_INPUT_INJECTION,
-                inputResult.reason(), 0, 0, elapsed(start), 400));
+                inputResult.reason(), 0, 0, elapsed(start), 400, false));
             throw GatewayException.injectionDetected();
         }
 
-        // ── 3. Real LLM call ───────────────────────────────────────────
-        ChatResponse llmResponse = llmProxy.chat(request);
+        if (inputResult.jailbreakScore() >= 50 && !inputResult.isDetected()) {
+            // Elevated but under the block threshold — flag for review, don't block or lock.
+            threatDetectionService.raiseImmediateAlert(username, SecurityAlert.Type.ELEVATED_JAILBREAK_SCORE,
+                "Elevated jailbreak risk score (" + inputResult.jailbreakScore() + "/100) from " + username);
+        }
+
+        // ── 2b. PII detection on the prompt itself, before it ever reaches the LLM ──
+        InputScanService.PiiScanResult piiResult = inputScan.scanForPii(request.getUserMessage());
+        if (piiResult.isBlocked()) {
+            auditService.log(buildAudit(username, request, apiKeyId, ip, inputResult.jailbreakScore(),
+                AuditLog.Outcome.BLOCKED_INPUT_INJECTION, piiResult.reason(), 0, 0, elapsed(start), 400, false));
+            throw GatewayException.piiDetected();
+        }
+        if (piiResult.content() != null) {
+            request.setUserMessage(piiResult.content());
+        }
+
+        // ── 3. Real LLM call (token budget capped by the caller's API key tier) ──
+        int maxTokens = apiKeyService.get(apiKeyId).getMaxTokensPerRequest();
+        ChatResponse llmResponse = llmProxy.chat(request, maxTokens);
 
         // ── 4. Output scan ─────────────────────────────────────────────
         OutputScanService.ScanResult outputResult =
             outputScan.scan(llmResponse.getContent());
 
         if (outputResult.isBlocked()) {
-            auditService.log(buildAudit(username, request,
+            threatDetectionService.recordEvent(username, SecurityAlert.Type.REPEATED_OUTPUT_BLOCK);
+            if (outputResult.promptLeakDetected() && apiKeyId != null) {
+                apiKeyService.revoke(apiKeyId);
+                threatDetectionService.raiseImmediateAlert(username, SecurityAlert.Type.PROMPT_LEAK_DETECTED,
+                    "System prompt leak detected for user '" + username + "' — API key " + apiKeyId + " auto-revoked");
+            }
+            auditService.log(buildAudit(username, request, apiKeyId, ip, inputResult.jailbreakScore(),
                 AuditLog.Outcome.BLOCKED_OUTPUT_UNSAFE,
                 outputResult.reason(),
                 llmResponse.getUsage().getPromptTokens(),
                 llmResponse.getUsage().getCompletionTokens(),
-                elapsed(start), 400));
+                elapsed(start), 400, false));
             throw GatewayException.unsafeOutput();
         }
 
+        if (outputResult.competitorMentioned()) {
+            threatDetectionService.raiseImmediateAlert(username, SecurityAlert.Type.COMPETITOR_MENTION,
+                "Competitor mention in response to '" + username + "'");
+        }
+
         // ── 5. Audit log (async — never blocks response) ───────────────
-        auditService.log(buildAudit(username, request,
+        auditService.log(buildAudit(username, request, apiKeyId, ip, inputResult.jailbreakScore(),
             AuditLog.Outcome.SUCCESS, null,
             llmResponse.getUsage().getPromptTokens(),
             llmResponse.getUsage().getCompletionTokens(),
-            elapsed(start), 200));
+            elapsed(start), 200, false));
 
         ChatResponse finalResponse = outputResult.isSanitised()
             ? ChatResponse.builder()
@@ -122,6 +193,160 @@ public class ChatController {
             .body(finalResponse);
     }
 
+    @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @Operation(
+        summary = "Send a prompt through the secure gateway with token-by-token streaming",
+        security = @SecurityRequirement(name = "bearerAuth")
+    )
+    public SseEmitter chatStream(
+        @Valid @RequestBody ChatRequest request,
+        @AuthenticationPrincipal String username,
+        @RequestAttribute(name = "apiKeyId", required = false) String apiKeyId,
+        HttpServletRequest httpRequest
+    ) {
+        long start = System.currentTimeMillis();
+        String ip  = ClientIpResolver.resolve(httpRequest);
+        log.info("ChatStream — user='{}' provider={} ip={}", username, request.getProvider(), ip);
+
+        // ── 0. IP blocklist + account lockout ───────────────────────────
+        // Thrown (not manually built ResponseEntity, since this method must be declared to
+        // return SseEmitter) — Spring's exception resolution runs before return-value handling,
+        // so this behaves identically to /chat as long as it happens before the emitter exists.
+        if (threatDetectionService.isIpBlocked(ip)) {
+            auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
+                AuditLog.Outcome.BLOCKED_AUTH, "IP address blocked by admin",
+                0, 0, elapsed(start), 403, true));
+            throw GatewayException.ipBlocked();
+        }
+
+        if (threatDetectionService.isLocked(username)) {
+            long retryAfter = threatDetectionService.lockoutRemainingSeconds(username);
+            auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
+                AuditLog.Outcome.BLOCKED_AUTH, "Account temporarily locked due to suspicious activity",
+                0, 0, elapsed(start), 423, true));
+            throw GatewayException.locked(retryAfter);
+        }
+
+        threatDetectionService.recordIp(username, ip);
+        threatDetectionService.recordBurst(username);
+
+        // ── 1. Rate limit check ────────────────────────────────────────
+        RateLimitService.RateLimitResult rateResult = rateLimitService.checkLimit(username);
+        if (!rateResult.isAllowed()) {
+            threatDetectionService.recordEvent(username, SecurityAlert.Type.RATE_LIMIT_ABUSE);
+            auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
+                AuditLog.Outcome.BLOCKED_RATE_LIMIT,
+                "Rate limit exceeded: " + rateResult.limitType(),
+                0, 0, elapsed(start), 429, true));
+            throw GatewayException.rateLimited(rateResult.retryAfterSeconds(), rateResult.limitType());
+        }
+
+        // ── 2. Input scan (injection detection + jailbreak score) ──────
+        InputScanService.ScanResult inputResult =
+            inputScan.scan(request.getUserMessage(), request.getSystemPrompt());
+
+        if (inputResult.isDetected() && inputResult.shouldBlock()) {
+            threatDetectionService.recordEvent(username, SecurityAlert.Type.REPEATED_INJECTION);
+            threatDetectionService.recordAttackSignature(inputResult.reason(), username);
+            auditService.log(buildAudit(username, request, apiKeyId, ip, inputResult.jailbreakScore(),
+                AuditLog.Outcome.BLOCKED_INPUT_INJECTION,
+                inputResult.reason(), 0, 0, elapsed(start), 400, true));
+            throw GatewayException.injectionDetected();
+        }
+
+        if (inputResult.jailbreakScore() >= 50 && !inputResult.isDetected()) {
+            threatDetectionService.raiseImmediateAlert(username, SecurityAlert.Type.ELEVATED_JAILBREAK_SCORE,
+                "Elevated jailbreak risk score (" + inputResult.jailbreakScore() + "/100) from " + username);
+        }
+
+        // ── 2b. PII detection on the prompt itself, before it ever reaches the LLM ──
+        InputScanService.PiiScanResult piiResult = inputScan.scanForPii(request.getUserMessage());
+        if (piiResult.isBlocked()) {
+            auditService.log(buildAudit(username, request, apiKeyId, ip, inputResult.jailbreakScore(),
+                AuditLog.Outcome.BLOCKED_INPUT_INJECTION, piiResult.reason(), 0, 0, elapsed(start), 400, true));
+            throw GatewayException.piiDetected();
+        }
+        if (piiResult.content() != null) {
+            request.setUserMessage(piiResult.content());
+        }
+
+        // ── 3. Stream from the provider (token budget capped by the caller's API key tier) ──
+        int maxTokens = apiKeyService.get(apiKeyId).getMaxTokensPerRequest();
+        int jailbreakScore = inputResult.jailbreakScore();
+
+        SseEmitter emitter = new SseEmitter(0L);
+        StringBuilder accumulated = new StringBuilder();
+        AtomicReference<ChatResponse.TokenUsage> finalUsage = new AtomicReference<>();
+
+        // Wire format is intentionally plain data:-only frames terminated by a literal
+        // "data: [DONE]" (no named SSE events) — matches the OpenAI-style raw streaming
+        // convention external clients commonly already parse. Token usage/outcome are still
+        // fully captured server-side in the audit log regardless of what's sent over the wire.
+        llmProxy.streamChat(request, maxTokens).subscribe(
+            chunk -> {
+                try {
+                    if (chunk.textDelta() != null) {
+                        emitter.send(SseEmitter.event().data(chunk.textDelta()));
+                        accumulated.append(chunk.textDelta());
+                    }
+                    if (chunk.done()) {
+                        finalUsage.set(chunk.finalUsage());
+                    }
+                } catch (IOException | IllegalStateException e) {
+                    log.debug("Stream send failed (client likely disconnected): {}", e.getMessage());
+                }
+            },
+            error -> {
+                log.error("Chat stream error for user='{}': {}", username, error.getMessage());
+                try {
+                    // In-band error marker — a fixed, unambiguous prefix so it can't be mistaken
+                    // for real model output, followed by the same [DONE] terminator as success.
+                    emitter.send(SseEmitter.event().data("[GATEWAY_ERROR: " + error.getMessage() + "]"));
+                    emitter.send(SseEmitter.event().data("[DONE]"));
+                } catch (IOException | IllegalStateException ignored) {
+                    // response already committed/closed — nothing more we can tell the client
+                }
+                auditService.log(buildAudit(username, request, apiKeyId, ip, jailbreakScore,
+                    AuditLog.Outcome.ERROR, error.getMessage(), 0, 0, elapsed(start), 502, true));
+                emitter.complete();
+            },
+            () -> {
+                // Content is already fully delivered — output scanning here can only alert/
+                // auto-revoke/count-toward-lockout, never block or redact what was already sent.
+                String content = accumulated.toString();
+                OutputScanService.ScanResult outputResult = outputScan.scan(content);
+                ChatResponse.TokenUsage usage = finalUsage.get();
+                int promptTokens     = usage != null ? usage.getPromptTokens() : 0;
+                int completionTokens = usage != null ? usage.getCompletionTokens() : 0;
+
+                if (outputResult.isBlocked()) {
+                    threatDetectionService.recordEvent(username, SecurityAlert.Type.REPEATED_OUTPUT_BLOCK);
+                    if (outputResult.promptLeakDetected() && apiKeyId != null) {
+                        apiKeyService.revoke(apiKeyId);
+                        threatDetectionService.raiseImmediateAlert(username, SecurityAlert.Type.PROMPT_LEAK_DETECTED,
+                            "System prompt leak detected for user '" + username + "' — API key " + apiKeyId +
+                                " auto-revoked (streamed response, could not be blocked pre-delivery)");
+                    }
+                }
+                if (outputResult.competitorMentioned()) {
+                    threatDetectionService.raiseImmediateAlert(username, SecurityAlert.Type.COMPETITOR_MENTION,
+                        "Competitor mention in streamed response to '" + username + "'");
+                }
+
+                auditService.log(buildAudit(username, request, apiKeyId, ip, jailbreakScore,
+                    AuditLog.Outcome.SUCCESS, null, promptTokens, completionTokens, elapsed(start), 200, true));
+
+                try {
+                    emitter.send(SseEmitter.event().data("[DONE]"));
+                } catch (IOException | IllegalStateException ignored) {
+                }
+                emitter.complete();
+            }
+        );
+
+        return emitter;
+    }
+
     @GetMapping("/health")
     @Operation(summary = "Authenticated health check",
                security = @SecurityRequirement(name = "bearerAuth"))
@@ -130,12 +355,15 @@ public class ChatController {
     }
 
     private AuditLog buildAudit(
-        String userId, ChatRequest req, AuditLog.Outcome outcome,
-        String blockReason, int promptTokens, int completionTokens,
-        long latencyMs, int httpStatus
+        String userId, ChatRequest req, String apiKeyId, String ipAddress, int jailbreakScore,
+        AuditLog.Outcome outcome, String blockReason, int promptTokens, int completionTokens,
+        long latencyMs, int httpStatus, boolean streamed
     ) {
         return AuditLog.builder()
             .userId(userId)
+            .apiKeyId(apiKeyId)
+            .ipAddress(ipAddress)
+            .jailbreakScore(jailbreakScore)
             .promptHash(AuditService.hash(req.getUserMessage()))
             .provider(req.getProvider().name())
             .model(req.getModel())
@@ -145,6 +373,7 @@ public class ChatController {
             .completionTokens(completionTokens)
             .latencyMs(latencyMs)
             .httpStatus(httpStatus)
+            .streamed(streamed)
             .build();
     }
 

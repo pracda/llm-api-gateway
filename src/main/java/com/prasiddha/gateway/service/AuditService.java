@@ -24,11 +24,13 @@ import java.util.HexFormat;
 public class AuditService {
 
     private final AuditLogRepository repository;
+    private final RealtimeEventPublisher eventPublisher;
 
     @Async("auditExecutor")
     public void log(AuditLog entry) {
         try {
             repository.save(entry);
+            eventPublisher.publishAudit(entry);
         } catch (Exception e) {
             // Audit failures MUST NOT affect the client response
             log.error("Audit log write failed: {}", e.getMessage());

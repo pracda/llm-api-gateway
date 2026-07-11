@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Gateway Operations Center</title>
+<style>
+  .dash {
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:           #e1e0d9;
+    --border:         rgba(11,11,11,0.10);
+    --series-blue:    #2a78d6;
+    --series-aqua:    #1baf7a;
+    --series-violet:  #4a3aa7;
+    --good:           #0ca30c;
+    --warning:        #fab219;
+    --serious:        #ec835a;
+    --critical:       #d03b3b;
+    --seq-100: #cde2fb; --seq-250: #86b6ef; --seq-450: #2a78d6; --seq-650: #104281;
+
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text-primary);
+    background: var(--page);
+    min-height: 100vh;
+  }
+  @media (prefers-color-scheme: dark) {
+    .dash {
+      --surface-1:      #1a1a19;
+      --page:           #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid:           #2c2c2a;
+      --border:         rgba(255,255,255,0.10);
+      --series-blue:    #3987e5;
+      --series-aqua:    #199e70;
+      --series-violet:  #9085e9;
+      --good:           #0ca30c;
+      --warning:        #fab219;
+      --serious:        #ec835a;
+      --critical:       #d03b3b;
+      --seq-100: #184f95; --seq-250: #1c5cab; --seq-450: #3987e5; --seq-650: #9ec5f4;
+    }
+  }
+  .dash * { box-sizing: border-box; }
+  .dash a { color: var(--series-blue); }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 20px 16px 60px; }
+
+  .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; flex-wrap: wrap; gap: 8px; }
+  .topbar h1 { font-size: 18px; letter-spacing: 0.02em; margin: 0; }
+  .live { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+  .live .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 25%, transparent); }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; overflow-x: auto; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin: 0 0 12px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .tile .label { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+  .tile .value { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .feed { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; font-size: 13px; }
+  .feed li { display: flex; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--grid); }
+  .feed li:last-child { border-bottom: none; }
+  .feed .user { font-weight: 600; min-width: 120px; }
+  .feed .meta { color: var(--text-secondary); }
+  .feed .status-label { font-weight: 600; }
+  .feed .status-label.good { color: var(--good); }
+  .feed .status-label.critical { color: var(--critical); }
+  .feed .status-label.serious { color: var(--serious); }
+  .feed .status-label.warning { color: color-mix(in srgb, var(--warning) 70%, black); }
+
+  table.data { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table.data th { text-align: left; color: var(--text-muted); font-weight: 500; font-size: 12px; padding: 4px 8px; border-bottom: 1px solid var(--grid); }
+  table.data td { padding: 6px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  table.data tr:last-child td { border-bottom: none; }
+
+  .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+  .badge.CRITICAL { background: color-mix(in srgb, var(--critical) 18%, transparent); color: var(--critical); }
+  .badge.HIGH     { background: color-mix(in srgb, var(--serious) 20%, transparent); color: var(--serious); }
+  .badge.MEDIUM   { background: color-mix(in srgb, var(--warning) 25%, transparent); color: color-mix(in srgb, var(--warning) 65%, black); }
+  .badge.LOW      { background: color-mix(in srgb, var(--good) 18%, transparent); color: var(--good); }
+
+  .reasons { color: var(--text-secondary); font-size: 12px; }
+
+  button, input[type=text], input[type=password], select {
+    font-family: inherit; font-size: 13px; padding: 7px 10px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--page); color: var(--text-primary);
+  }
+  .field label { display: block; font-size: 11px; color: var(--text-muted); margin-bottom: 2px; }
+  .key-banner {
+    display: none; margin-bottom: 12px; padding: 10px 12px; border-radius: 8px; font-size: 13px;
+    background: color-mix(in srgb, var(--good) 12%, transparent); border: 1px solid var(--good);
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  button { cursor: pointer; background: var(--series-blue); color: white; border: none; font-weight: 600; }
+  button.ghost { background: transparent; color: var(--series-blue); border: 1px solid var(--border); font-weight: 500; }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .row.between { justify-content: space-between; }
+
+  .timeline { display: flex; align-items: flex-end; gap: 3px; height: 60px; }
+  .timeline .bar { flex: 1; background: var(--seq-450); border-radius: 3px 3px 1px 1px; min-height: 2px; }
+  .timeline-labels { display: flex; gap: 3px; font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+  .timeline-labels span { flex: 1; text-align: center; }
+
+  .login-card { max-width: 360px; margin: 80px auto; }
+  .login-card label { display: block; font-size: 12px; color: var(--text-muted); margin: 10px 0 4px; }
+  .login-card input { width: 100%; }
+  .login-error { color: var(--critical); font-size: 12px; margin-top: 8px; }
+
+  .empty { color: var(--text-muted); font-size: 13px; padding: 8px 0; }
+</style>
+</head>
+<body>
+<div class="dash">
+  <div id="loginView" class="wrap">
+    <div class="card login-card">
+      <h2>Gateway Operations Center — Admin Sign In</h2>
+      <label for="loginUser">Username</label>
+      <input id="loginUser" type="text" autocomplete="username" />
+      <label for="loginPass">Password</label>
+      <input id="loginPass" type="password" autocomplete="current-password" />
+      <div class="row" style="margin-top:14px">
+        <button onclick="doLogin()">Sign in</button>
+      </div>
+      <div id="loginError" class="login-error"></div>
+    </div>
+  </div>
+
+  <div id="dashView" class="wrap" style="display:none">
+    <div class="topbar">
+      <h1>GATEWAY OPERATIONS CENTER</h1>
+      <div class="live"><span class="dot"></span> Live · <span id="feedCount">0</span> events</div>
+    </div>
+
+    <div class="tiles">
+      <div class="tile"><div class="label">Requests today</div><div class="value" id="tileTotal">–</div></div>
+      <div class="tile"><div class="label">Blocked today</div><div class="value" id="tileBlocked">–</div></div>
+      <div class="tile"><div class="label">Unacknowledged alerts</div><div class="value" id="tileAlerts">–</div></div>
+      <div class="tile"><div class="label">Avg latency</div><div class="value" id="tileLatency">–</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Organizations & API Keys</h2>
+      <div class="row" style="margin-bottom:14px">
+        <select id="orgSelect" onchange="onOrgSelected()"><option value="">Select organization…</option></select>
+        <input id="newOrgName" type="text" placeholder="New organization name" style="min-width:200px" />
+        <button onclick="createOrg()">Create org</button>
+      </div>
+
+      <div id="orgDetail" style="display:none">
+        <div class="row" style="margin-bottom:4px">
+          <input id="memberUsername" type="text" placeholder="username to add as member" />
+          <button class="ghost" onclick="addMember()">Add member</button>
+        </div>
+        <div class="empty" style="margin-bottom:10px">The username must already exist — have them register via /api/v1/auth/register first.</div>
+
+        <div class="row" style="margin-bottom:10px; align-items:flex-end">
+          <div class="field"><label>Username</label><input id="keyUsername" type="text" placeholder="org member" /></div>
+          <div class="field"><label>Tier</label>
+            <select id="keyTier" onchange="onTierChanged()">
+              <option value="TRIAL">Trial</option>
+              <option value="STANDARD">Standard</option>
+              <option value="ENTERPRISE">Enterprise</option>
+            </select>
+          </div>
+          <div class="field"><label>Key name</label><input id="keyName" type="text" placeholder="e.g. prod-server" /></div>
+          <div id="enterpriseFields" class="row" style="display:none">
+            <div class="field"><label>Requests/day</label><input id="keyReqPerDay" type="text" style="width:100px" placeholder="50000" /></div>
+            <div class="field"><label>Max tokens/req</label><input id="keyMaxTokens" type="text" style="width:100px" placeholder="8000" /></div>
+            <div class="field"><label>Expiry (days)</label><input id="keyExpiryDays" type="text" style="width:100px" placeholder="never" /></div>
+          </div>
+          <button onclick="issueKey()">Issue key</button>
+        </div>
+
+        <div id="newKeyBanner" class="key-banner">
+          <strong>New key created — shown once, copy it now:</strong>
+          <div class="row" style="margin-top:6px">
+            <code id="newKeyValue" style="word-break:break-all; flex:1"></code>
+            <button class="ghost" onclick="copyNewKey()">Copy</button>
+            <button class="ghost" onclick="dismissNewKeyBanner()">Dismiss</button>
+          </div>
+        </div>
+
+        <table class="data" id="orgKeysTable">
+          <thead><tr><th>Name</th><th>Owner</th><th>Prefix</th><th>Tier</th><th>Status</th><th>Limits</th><th>Expires</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty" id="orgKeysEmpty" style="display:none">No API keys issued yet for this organization.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row between">
+        <h2 style="margin:0">Live request feed</h2>
+      </div>
+      <ul class="feed" id="feedList"></ul>
+    </div>
+
+    <div class="card">
+      <h2>User risk rankings (last 24h)</h2>
+      <table class="data" id="riskTable">
+        <thead><tr><th>User</th><th>Score</th><th>Signals</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty" id="riskEmpty" style="display:none">No elevated-risk users in the last 24h.</div>
+    </div>
+
+    <div class="card">
+      <h2>Security alerts</h2>
+      <table class="data" id="alertsTable">
+        <thead><tr><th>Severity</th><th>Type</th><th>Message</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty" id="alertsEmpty" style="display:none">No unacknowledged alerts.</div>
+    </div>
+
+    <div class="card">
+      <h2>Attack timeline — last 24h</h2>
+      <div class="timeline" id="timelineBars"></div>
+      <div class="timeline-labels" id="timelineLabels"></div>
+    </div>
+
+    <div class="card">
+      <h2>IP blocklist</h2>
+      <div class="row" style="margin-bottom:10px">
+        <input id="ipInput" type="text" placeholder="203.0.113.7" />
+        <button onclick="blockIp()">Block IP</button>
+      </div>
+      <table class="data" id="ipTable">
+        <thead><tr><th>IP address</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty" id="ipEmpty" style="display:none">No IPs currently blocked.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var token = null;
+  var eventSource = null;
+  var feedCount = 0;
+
+  function api(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({ 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, opts.headers || {});
+    return fetch(path, opts).then(function (res) {
+      if (!res.ok) {
+        return res.json().catch(function () { return null; }).then(function (body) {
+          throw new Error((body && body.error) ? body.error : ('Request failed: ' + res.status));
+        });
+      }
+      return res.status === 204 ? null : res.json();
+    });
+  }
+
+  window.doLogin = function () {
+    var username = document.getElementById('loginUser').value.trim();
+    var password = document.getElementById('loginPass').value;
+    var errorEl = document.getElementById('loginError');
+    errorEl.textContent = '';
+
+    fetch('/api/v1/auth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: username, password: password })
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error('Invalid credentials or account locked');
+        return res.json();
+      })
+      .then(function (data) {
+        token = data.token;
+        document.getElementById('loginView').style.display = 'none';
+        document.getElementById('dashView').style.display = 'block';
+        startDashboard();
+      })
+      .catch(function (e) { errorEl.textContent = e.message; });
+  };
+
+  function startDashboard() {
+    refreshStats();
+    refreshAlerts();
+    refreshRiskRankings();
+    refreshTimeline();
+    refreshIpBlocks();
+    refreshOrgs();
+    connectStream();
+    setInterval(refreshStats, 20000);
+    setInterval(refreshAlerts, 20000);
+    setInterval(refreshRiskRankings, 20000);
+    setInterval(refreshTimeline, 60000);
+  }
+
+  // ── Organizations & API keys ─────────────────────────────────────────
+
+  var currentOrgId = null;
+
+  function refreshOrgs() {
+    return api('/api/v1/admin/organizations').then(function (list) {
+      var select = document.getElementById('orgSelect');
+      var prevValue = select.value;
+      select.innerHTML = '<option value="">Select organization…</option>' +
+        list.map(function (o) { return '<option value="' + o.id + '">' + o.name + '</option>'; }).join('');
+      if (prevValue && list.some(function (o) { return o.id === prevValue; })) {
+        select.value = prevValue;
+      }
+    }).catch(function () {});
+  }
+
+  window.onOrgSelected = function () {
+    currentOrgId = document.getElementById('orgSelect').value || null;
+    document.getElementById('orgDetail').style.display = currentOrgId ? 'block' : 'none';
+    dismissNewKeyBanner();
+    if (currentOrgId) refreshOrgKeys();
+  };
+
+  window.createOrg = function () {
+    var name = document.getElementById('newOrgName').value.trim();
+    if (!name) return;
+    api('/api/v1/admin/organizations', { method: 'POST', body: JSON.stringify({ name: name }) })
+      .then(function (org) {
+        document.getElementById('newOrgName').value = '';
+        return refreshOrgs().then(function () {
+          document.getElementById('orgSelect').value = org.id;
+          onOrgSelected();
+        });
+      })
+      .catch(function (e) { alert('Could not create organization: ' + e.message); });
+  };
+
+  window.addMember = function () {
+    if (!currentOrgId) return;
+    var username = document.getElementById('memberUsername').value.trim();
+    if (!username) return;
+    api('/api/v1/admin/organizations/' + currentOrgId + '/members', { method: 'POST', body: JSON.stringify({ username: username }) })
+      .then(function () { document.getElementById('memberUsername').value = ''; })
+      .catch(function (e) { alert('Could not add member (is the username registered?): ' + e.message); });
+  };
+
+  window.onTierChanged = function () {
+    var isEnterprise = document.getElementById('keyTier').value === 'ENTERPRISE';
+    document.getElementById('enterpriseFields').style.display = isEnterprise ? 'flex' : 'none';
+  };
+
+  window.issueKey = function () {
+    if (!currentOrgId) return;
+    var username = document.getElementById('keyUsername').value.trim();
+    var tier = document.getElementById('keyTier').value;
+    var name = document.getElementById('keyName').value.trim();
+    if (!username || !name) { alert('Username and key name are required.'); return; }
+
+    var body = { username: username, tier: tier, name: name };
+    if (tier === 'ENTERPRISE') {
+      var reqPerDay = parseInt(document.getElementById('keyReqPerDay').value, 10);
+      var maxTokens = parseInt(document.getElementById('keyMaxTokens').value, 10);
+      var expiryDays = parseInt(document.getElementById('keyExpiryDays').value, 10);
+      if (!reqPerDay || !maxTokens) { alert('Enterprise keys require requests/day and max tokens/request.'); return; }
+      body.requestsPerDay = reqPerDay;
+      body.maxTokensPerRequest = maxTokens;
+      if (expiryDays) body.expiresInDays = expiryDays;
+    }
+
+    api('/api/v1/admin/organizations/' + currentOrgId + '/api-keys', { method: 'POST', body: JSON.stringify(body) })
+      .then(function (created) {
+        document.getElementById('keyUsername').value = '';
+        document.getElementById('keyName').value = '';
+        document.getElementById('newKeyValue').textContent = created.apiKey;
+        document.getElementById('newKeyBanner').style.display = 'block';
+        refreshOrgKeys();
+      })
+      .catch(function (e) { alert('Could not issue key (is the user a member of this org?): ' + e.message); });
+  };
+
+  window.copyNewKey = function () {
+    var text = document.getElementById('newKeyValue').textContent;
+    if (text && navigator.clipboard) navigator.clipboard.writeText(text);
+  };
+
+  window.dismissNewKeyBanner = function () {
+    document.getElementById('newKeyBanner').style.display = 'none';
+    document.getElementById('newKeyValue').textContent = '';
+  };
+
+  function refreshOrgKeys() {
+    if (!currentOrgId) return;
+    api('/api/v1/admin/organizations/' + currentOrgId).then(function (detail) {
+      var tbody = document.querySelector('#orgKeysTable tbody');
+      tbody.innerHTML = '';
+      var keys = detail.apiKeys || [];
+      document.getElementById('orgKeysEmpty').style.display = keys.length ? 'none' : 'block';
+      keys.forEach(function (k) {
+        var tr = document.createElement('tr');
+        var actions = '';
+        if (k.status === 'ACTIVE') {
+          actions = '<button class="ghost" onclick="suspendKey(\'' + k.id + '\')">Suspend</button> ' +
+                    '<button class="ghost" onclick="revokeKey(\'' + k.id + '\')">Revoke</button>';
+        } else if (k.status === 'SUSPENDED') {
+          actions = '<button class="ghost" onclick="resumeKey(\'' + k.id + '\')">Resume</button> ' +
+                    '<button class="ghost" onclick="revokeKey(\'' + k.id + '\')">Revoke</button>';
+        }
+        var statusBadge = k.status === 'ACTIVE' ? 'LOW' : k.status === 'SUSPENDED' ? 'MEDIUM' : 'CRITICAL';
+        tr.innerHTML =
+          '<td>' + k.name + '</td>' +
+          '<td>' + k.username + '</td>' +
+          '<td><code>' + k.keyPrefix + '…</code></td>' +
+          '<td>' + k.tier + '</td>' +
+          '<td><span class="badge ' + statusBadge + '">' + k.status + '</span></td>' +
+          '<td>' + k.requestsPerDay + '/day · ' + k.maxTokensPerRequest + ' tok/req</td>' +
+          '<td>' + (k.expiresAt ? new Date(k.expiresAt).toLocaleDateString() : 'never') + '</td>' +
+          '<td>' + actions + '</td>';
+        tbody.appendChild(tr);
+      });
+    }).catch(function () {});
+  }
+
+  window.suspendKey = function (id) {
+    api('/api/v1/admin/api-keys/' + id + '/suspend', { method: 'POST' }).then(refreshOrgKeys).catch(function () {});
+  };
+  window.resumeKey = function (id) {
+    api('/api/v1/admin/api-keys/' + id + '/resume', { method: 'POST' }).then(refreshOrgKeys).catch(function () {});
+  };
+  window.revokeKey = function (id) {
+    if (!confirm('Permanently revoke this API key? This cannot be undone.')) return;
+    api('/api/v1/admin/api-keys/' + id, { method: 'DELETE' }).then(refreshOrgKeys).catch(function () {});
+  };
+
+  function connectStream() {
+    eventSource = new EventSource('/api/v1/admin/stream?token=' + encodeURIComponent(token));
+    eventSource.addEventListener('audit', function (e) { appendFeed(JSON.parse(e.data), 'audit'); });
+    eventSource.addEventListener('alert', function (e) { appendFeed(JSON.parse(e.data), 'alert'); refreshAlerts(); });
+  }
+
+  function appendFeed(evt, kind) {
+    var list = document.getElementById('feedList');
+    var li = document.createElement('li');
+    var label, cls, meta;
+
+    if (kind === 'audit') {
+      if (evt.outcome === 'SUCCESS') { label = '✅ OK'; cls = 'good'; }
+      else if (evt.outcome === 'BLOCKED_AUTH') { label = '🔒 LOCKED'; cls = 'critical'; }
+      else if (evt.outcome === 'BLOCKED_RATE_LIMIT') { label = '🔴 RATE LIMITED'; cls = 'serious'; }
+      else if (evt.jailbreakScore >= 50) { label = '⚠️ FLAGGED'; cls = 'warning'; }
+      else { label = '🚫 BLOCKED'; cls = 'critical'; }
+      meta = (evt.provider || '') + ' ' + (evt.model || '') + ' · ' + evt.latencyMs + 'ms · ' +
+             (evt.promptTokens + evt.completionTokens) + ' tokens' + (evt.blockReason ? ' · ' + evt.blockReason : '');
+    } else {
+      label = '⚠️ ' + evt.severity;
+      cls = evt.severity === 'HIGH' ? 'critical' : evt.severity === 'MEDIUM' ? 'warning' : 'good';
+      meta = evt.type + ' · ' + evt.message;
+    }
+
+    li.innerHTML = '<span class="status-label ' + cls + '">' + label + '</span>' +
+      '<span class="user">' + (evt.username || 'system') + '</span>' +
+      '<span class="meta">' + meta + '</span>';
+    list.insertBefore(li, list.firstChild);
+    while (list.children.length > 50) list.removeChild(list.lastChild);
+    feedCount++;
+    document.getElementById('feedCount').textContent = feedCount;
+  }
+
+  function refreshStats() {
+    api('/api/v1/admin/stats/today').then(function (d) {
+      document.getElementById('tileTotal').textContent = d.totalRequests;
+      document.getElementById('tileBlocked').textContent = d.blocked;
+      document.getElementById('tileLatency').textContent = d.avgLatencyMs + 'ms';
+    }).catch(function () {});
+  }
+
+  function refreshAlerts() {
+    api('/api/v1/admin/alerts?acknowledged=false&size=20').then(function (page) {
+      document.getElementById('tileAlerts').textContent = page.totalElements;
+      var tbody = document.querySelector('#alertsTable tbody');
+      tbody.innerHTML = '';
+      var alerts = page.content || [];
+      document.getElementById('alertsEmpty').style.display = alerts.length ? 'none' : 'block';
+      alerts.forEach(function (a) {
+        var tr = document.createElement('tr');
+        var unlockBtn = a.autoLockApplied
+          ? '<button class="ghost" onclick="unlockUser(\'' + a.username + '\')">Unlock user</button> '
+          : '';
+        tr.innerHTML =
+          '<td><span class="badge ' + a.severity + '">' + a.severity + '</span></td>' +
+          '<td>' + a.type + (a.username ? ' — ' + a.username : '') + '</td>' +
+          '<td>' + a.message + '</td>' +
+          '<td>' + unlockBtn + '<button class="ghost" onclick="acknowledgeAlert(\'' + a.id + '\')">Acknowledge</button></td>';
+        tbody.appendChild(tr);
+      });
+    }).catch(function () {});
+  }
+
+  window.acknowledgeAlert = function (id) {
+    api('/api/v1/admin/alerts/' + id + '/acknowledge', { method: 'POST' }).then(refreshAlerts).catch(function () {});
+  };
+
+  window.unlockUser = function (username) {
+    api('/api/v1/admin/users/' + encodeURIComponent(username) + '/unlock', { method: 'POST' }).then(refreshRiskRankings).catch(function () {});
+  };
+
+  function refreshRiskRankings() {
+    api('/api/v1/admin/risk-rankings?limit=10').then(function (rows) {
+      var tbody = document.querySelector('#riskTable tbody');
+      tbody.innerHTML = '';
+      document.getElementById('riskEmpty').style.display = rows.length ? 'none' : 'block';
+      rows.forEach(function (r) {
+        var tr = document.createElement('tr');
+        var lockBtn = r.locked
+          ? '<span class="badge CRITICAL">LOCKED</span> <button class="ghost" onclick="unlockUser(\'' + r.username + '\')">Unlock</button>'
+          : '';
+        tr.innerHTML =
+          '<td><strong>' + r.username + '</strong></td>' +
+          '<td><span class="badge ' + r.severity + '">' + r.score + '/100</span></td>' +
+          '<td class="reasons">' + (r.reasons || []).join(' · ') + '</td>' +
+          '<td>' + lockBtn + '</td>';
+        tbody.appendChild(tr);
+      });
+    }).catch(function () {});
+  }
+
+  function refreshTimeline() {
+    api('/api/v1/admin/attack-timeline').then(function (buckets) {
+      var max = Math.max.apply(null, buckets.concat([1]));
+      var barsEl = document.getElementById('timelineBars');
+      var labelsEl = document.getElementById('timelineLabels');
+      barsEl.innerHTML = '';
+      labelsEl.innerHTML = '';
+      buckets.forEach(function (count, i) {
+        var bar = document.createElement('div');
+        bar.className = 'bar';
+        bar.style.height = Math.max(2, Math.round((count / max) * 56)) + 'px';
+        bar.title = count + ' blocked request(s), ' + (23 - i) + 'h ago';
+        barsEl.appendChild(bar);
+        if (i % 2 === 0) {
+          var lbl = document.createElement('span');
+          lbl.textContent = (23 - i) + 'h';
+          labelsEl.appendChild(lbl);
+        } else {
+          labelsEl.appendChild(document.createElement('span'));
+        }
+      });
+    }).catch(function () {});
+  }
+
+  function refreshIpBlocks() {
+    api('/api/v1/admin/ip-blocks').then(function (ips) {
+      var tbody = document.querySelector('#ipTable tbody');
+      tbody.innerHTML = '';
+      var list = ips || [];
+      document.getElementById('ipEmpty').style.display = list.length ? 'none' : 'block';
+      list.forEach(function (ip) {
+        var tr = document.createElement('tr');
+        tr.innerHTML = '<td>' + ip + '</td><td><button class="ghost" onclick="unblockIp(\'' + ip + '\')">Unblock</button></td>';
+        tbody.appendChild(tr);
+      });
+    }).catch(function () {});
+  }
+
+  window.blockIp = function () {
+    var ip = document.getElementById('ipInput').value.trim();
+    if (!ip) return;
+    api('/api/v1/admin/ip-blocks', { method: 'POST', body: JSON.stringify({ ip: ip }) })
+      .then(function () { document.getElementById('ipInput').value = ''; refreshIpBlocks(); })
+      .catch(function () {});
+  };
+
+  window.unblockIp = function (ip) {
+    api('/api/v1/admin/ip-blocks/' + encodeURIComponent(ip), { method: 'DELETE' }).then(refreshIpBlocks).catch(function () {});
+  };
+})();
+</script>
+</body>
+</html>

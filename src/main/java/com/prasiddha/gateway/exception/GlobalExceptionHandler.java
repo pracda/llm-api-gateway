@@ -30,7 +30,14 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(GatewayException.class)
     public ResponseEntity<Map<String, Object>> handleGateway(GatewayException ex) {
         log.warn("Gateway exception: {}", ex.getMessage());
-        return ResponseEntity.status(ex.getStatus()).body(errorBody(ex.getMessage(), null));
+        Map<String, Object> body = errorBody(ex.getMessage(), null);
+        if (ex.getRetryAfterSeconds() != null) {
+            body.put("retryAfterSeconds", ex.getRetryAfterSeconds());
+        }
+        if (ex.getLimitType() != null) {
+            body.put("limitType", ex.getLimitType());
+        }
+        return ResponseEntity.status(ex.getStatus()).body(body);
     }
 
     @ExceptionHandler(AuthenticationException.class)

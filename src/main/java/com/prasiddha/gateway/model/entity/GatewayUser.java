@@ -28,6 +28,9 @@ public class GatewayUser {
     @Column(nullable = false)
     private boolean enabled;
 
+    /** Nullable — set when an admin adds this user to an {@link Organization}. */
+    private String organizationId;
+
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
 

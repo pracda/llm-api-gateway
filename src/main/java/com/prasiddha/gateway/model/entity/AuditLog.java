@@ -2,6 +2,7 @@ package com.prasiddha.gateway.model.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.ColumnDefault;
 import java.time.Instant;
 
 /**
@@ -45,6 +46,23 @@ public class AuditLog {
     private int completionTokens;
     private long latencyMs;
     private int httpStatus;
+
+    /** 0-100 heuristic risk score from InputScanService — logged even when the request passes. */
+    @ColumnDefault("0")
+    @Column(nullable = false)
+    private int jailbreakScore;
+
+    @Column(length = 45)
+    private String ipAddress;
+
+    /** Nullable — which ApiKey authenticated this request. */
+    @Column(length = 36)
+    private String apiKeyId;
+
+    /** True for /api/v1/chat/stream calls — output scanning on these ran AFTER delivery, not before. */
+    @ColumnDefault("false")
+    @Column(nullable = false)
+    private boolean streamed;
 
     @Column(nullable = false, updatable = false)
     private Instant createdAt;

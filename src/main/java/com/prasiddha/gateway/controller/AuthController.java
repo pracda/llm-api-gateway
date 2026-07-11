@@ -1,8 +1,10 @@
 package com.prasiddha.gateway.controller;
 
 import com.prasiddha.gateway.model.entity.GatewayUser;
+import com.prasiddha.gateway.model.entity.SecurityAlert;
 import com.prasiddha.gateway.repository.UserRepository;
 import com.prasiddha.gateway.security.JwtUtil;
+import com.prasiddha.gateway.service.ThreatDetectionService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -10,6 +12,8 @@ import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.*;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -29,6 +33,7 @@ public class AuthController {
     private final JwtUtil jwtUtil;
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
+    private final ThreatDetectionService threatDetectionService;
 
     @PostMapping("/register")
     @Operation(summary = "Register a new user")
@@ -49,7 +54,21 @@ public class AuthController {
     @PostMapping("/token")
     @Operation(summary = "Login — returns a JWT token")
     public ResponseEntity<?> token(@Valid @RequestBody LoginRequest req) {
-        authManager.authenticate(new UsernamePasswordAuthenticationToken(req.getUsername(), req.getPassword()));
+        if (threatDetectionService.isLocked(req.getUsername())) {
+            long retryAfter = threatDetectionService.lockoutRemainingSeconds(req.getUsername());
+            log.warn("Login rejected — account temporarily locked: {}", req.getUsername());
+            return ResponseEntity.status(HttpStatus.LOCKED)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(retryAfter))
+                .body(Map.of("error", "Account temporarily locked due to suspicious activity"));
+        }
+
+        try {
+            authManager.authenticate(new UsernamePasswordAuthenticationToken(req.getUsername(), req.getPassword()));
+        } catch (BadCredentialsException e) {
+            threatDetectionService.recordEvent(req.getUsername(), SecurityAlert.Type.LOGIN_BRUTE_FORCE);
+            throw e;
+        }
+
         GatewayUser user = userRepository.findByUsername(req.getUsername()).orElseThrow();
         user.setLastLoginAt(Instant.now());
         userRepository.save(user);
