@@ -57,6 +57,7 @@ public class ChatController {
     private final RateLimitService       rateLimitService;
     private final ThreatDetectionService threatDetectionService;
     private final ApiKeyService          apiKeyService;
+    private final IntentClassificationService intentClassificationService;
 
     @PostMapping("/chat")
     @Operation(
@@ -77,7 +78,7 @@ public class ChatController {
         if (threatDetectionService.isIpBlocked(ip)) {
             auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
                 AuditLog.Outcome.BLOCKED_AUTH, "IP address blocked by admin",
-                0, 0, elapsed(start), 403, false));
+                0, 0, elapsed(start), 403, false, true, false));
             return ResponseEntity.status(403).build();
         }
 
@@ -85,7 +86,7 @@ public class ChatController {
             long retryAfter = threatDetectionService.lockoutRemainingSeconds(username);
             auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
                 AuditLog.Outcome.BLOCKED_AUTH, "Account temporarily locked due to suspicious activity",
-                0, 0, elapsed(start), 423, false));
+                0, 0, elapsed(start), 423, false, false, true));
             return ResponseEntity.status(HttpStatus.LOCKED)
                 .header(HttpHeaders.RETRY_AFTER, String.valueOf(retryAfter))
                 .build();
@@ -101,7 +102,7 @@ public class ChatController {
             auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
                 AuditLog.Outcome.BLOCKED_RATE_LIMIT,
                 "Rate limit exceeded: " + rateResult.limitType(),
-                0, 0, elapsed(start), 429, false));
+                0, 0, elapsed(start), 429, false, false, threatDetectionService.isLocked(username)));
 
             return ResponseEntity.status(429)
                 .header(HttpHeaders.RETRY_AFTER, String.valueOf(rateResult.retryAfterSeconds()))
@@ -169,11 +170,12 @@ public class ChatController {
         }
 
         // ── 5. Audit log (async — never blocks response) ───────────────
+        threatDetectionService.recordSuccess(username);
         auditService.log(buildAudit(username, request, apiKeyId, ip, inputResult.jailbreakScore(),
             AuditLog.Outcome.SUCCESS, null,
             llmResponse.getUsage().getPromptTokens(),
             llmResponse.getUsage().getCompletionTokens(),
-            elapsed(start), 200, false));
+            elapsed(start), 200, false, false, threatDetectionService.isLocked(username)));
 
         ChatResponse finalResponse = outputResult.isSanitised()
             ? ChatResponse.builder()
@@ -215,7 +217,7 @@ public class ChatController {
         if (threatDetectionService.isIpBlocked(ip)) {
             auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
                 AuditLog.Outcome.BLOCKED_AUTH, "IP address blocked by admin",
-                0, 0, elapsed(start), 403, true));
+                0, 0, elapsed(start), 403, true, true, false));
             throw GatewayException.ipBlocked();
         }
 
@@ -223,7 +225,7 @@ public class ChatController {
             long retryAfter = threatDetectionService.lockoutRemainingSeconds(username);
             auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
                 AuditLog.Outcome.BLOCKED_AUTH, "Account temporarily locked due to suspicious activity",
-                0, 0, elapsed(start), 423, true));
+                0, 0, elapsed(start), 423, true, false, true));
             throw GatewayException.locked(retryAfter);
         }
 
@@ -237,7 +239,7 @@ public class ChatController {
             auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
                 AuditLog.Outcome.BLOCKED_RATE_LIMIT,
                 "Rate limit exceeded: " + rateResult.limitType(),
-                0, 0, elapsed(start), 429, true));
+                0, 0, elapsed(start), 429, true, false, threatDetectionService.isLocked(username)));
             throw GatewayException.rateLimited(rateResult.retryAfterSeconds(), rateResult.limitType());
         }
 
@@ -307,7 +309,8 @@ public class ChatController {
                     // response already committed/closed — nothing more we can tell the client
                 }
                 auditService.log(buildAudit(username, request, apiKeyId, ip, jailbreakScore,
-                    AuditLog.Outcome.ERROR, error.getMessage(), 0, 0, elapsed(start), 502, true));
+                    AuditLog.Outcome.ERROR, error.getMessage(), 0, 0, elapsed(start), 502, true,
+                    false, threatDetectionService.isLocked(username)));
                 emitter.complete();
             },
             () -> {
@@ -333,8 +336,10 @@ public class ChatController {
                         "Competitor mention in streamed response to '" + username + "'");
                 }
 
+                threatDetectionService.recordSuccess(username);
                 auditService.log(buildAudit(username, request, apiKeyId, ip, jailbreakScore,
-                    AuditLog.Outcome.SUCCESS, null, promptTokens, completionTokens, elapsed(start), 200, true));
+                    AuditLog.Outcome.SUCCESS, null, promptTokens, completionTokens, elapsed(start), 200, true,
+                    false, threatDetectionService.isLocked(username), outputResult.isBlocked()));
 
                 try {
                     emitter.send(SseEmitter.event().data("[DONE]"));
@@ -359,6 +364,42 @@ public class ChatController {
         AuditLog.Outcome outcome, String blockReason, int promptTokens, int completionTokens,
         long latencyMs, int httpStatus, boolean streamed
     ) {
+        return buildAudit(userId, req, apiKeyId, ipAddress, jailbreakScore, outcome, blockReason,
+            promptTokens, completionTokens, latencyMs, httpStatus, streamed, false, false);
+    }
+
+    private AuditLog buildAudit(
+        String userId, ChatRequest req, String apiKeyId, String ipAddress, int jailbreakScore,
+        AuditLog.Outcome outcome, String blockReason, int promptTokens, int completionTokens,
+        long latencyMs, int httpStatus, boolean streamed, boolean ipBlocked, boolean accountLocked
+    ) {
+        return buildAudit(userId, req, apiKeyId, ipAddress, jailbreakScore, outcome, blockReason,
+            promptTokens, completionTokens, latencyMs, httpStatus, streamed, ipBlocked, accountLocked,
+            outcome == AuditLog.Outcome.BLOCKED_OUTPUT_UNSAFE);
+    }
+
+    /**
+     * outputBlocked is an explicit override (not derived from outcome) because streamed
+     * responses can be flagged as unsafe AFTER full delivery — the outcome is still logged
+     * as SUCCESS (content already reached the client), but the intent classification must
+     * still reflect that the output scan actually flagged it.
+     */
+    private AuditLog buildAudit(
+        String userId, ChatRequest req, String apiKeyId, String ipAddress, int jailbreakScore,
+        AuditLog.Outcome outcome, String blockReason, int promptTokens, int completionTokens,
+        long latencyMs, int httpStatus, boolean streamed, boolean ipBlocked, boolean accountLocked,
+        boolean outputBlocked
+    ) {
+        IntentClassificationService.Result intent = intentClassificationService.classify(
+            new IntentClassificationService.Signals(
+                ipBlocked,
+                accountLocked,
+                outcome == AuditLog.Outcome.BLOCKED_INPUT_INJECTION,
+                outputBlocked,
+                jailbreakScore
+            )
+        );
+
         return AuditLog.builder()
             .userId(userId)
             .apiKeyId(apiKeyId)
@@ -374,6 +415,8 @@ public class ChatController {
             .latencyMs(latencyMs)
             .httpStatus(httpStatus)
             .streamed(streamed)
+            .intentClassification(intent.classification())
+            .intentReason(intent.reason())
             .build();
     }
 

@@ -15,6 +15,11 @@ spring:
     database-platform: org.hibernate.dialect.H2Dialect
     show-sql: true
 
+  # Flyway migrations are Postgres-specific SQL — tests use Hibernate
+  # create-drop against H2 instead, same as before Flyway was introduced.
+  flyway:
+    enabled: false
+
   # Disable Redis for unit tests — integration tests use Testcontainers
   data:
     redis:

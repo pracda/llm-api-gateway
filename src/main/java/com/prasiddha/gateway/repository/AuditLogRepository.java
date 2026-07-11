@@ -59,4 +59,41 @@ public interface AuditLogRepository extends JpaRepository<AuditLog, String> {
 
     @Query("SELECT a.createdAt FROM AuditLog a WHERE a.createdAt > :since AND a.outcome <> 'SUCCESS' ORDER BY a.createdAt")
     List<Instant> findBlockedTimestampsAfter(@Param("since") Instant since);
+
+    // ── Per-user evidence trail (intent classification + behavioral baseline) ──
+
+    @Query("SELECT a.intentClassification, COUNT(a) FROM AuditLog a " +
+           "WHERE a.userId = :userId AND a.createdAt > :since GROUP BY a.intentClassification")
+    List<Object[]> countByIntentClassificationForUser(@Param("userId") String userId, @Param("since") Instant since);
+
+    @Query("SELECT AVG(a.jailbreakScore) FROM AuditLog a WHERE a.userId = :userId AND a.createdAt > :since")
+    Double avgJailbreakScoreForUser(@Param("userId") String userId, @Param("since") Instant since);
+
+    // ── Per-organization views (joins by username, not a JPA relation — GatewayUser.organizationId is a plain column) ──
+
+    @Query("SELECT a FROM AuditLog a WHERE a.createdAt > :since " +
+           "AND a.userId IN (SELECT u.username FROM GatewayUser u WHERE u.organizationId = :orgId)")
+    List<AuditLog> findByOrganizationMembersSince(@Param("orgId") String orgId, @Param("since") Instant since);
+
+    @Query(
+        value = "SELECT a FROM AuditLog a WHERE a.userId IN (SELECT u.username FROM GatewayUser u WHERE u.organizationId = :orgId)",
+        countQuery = "SELECT COUNT(a) FROM AuditLog a WHERE a.userId IN (SELECT u.username FROM GatewayUser u WHERE u.organizationId = :orgId)"
+    )
+    Page<AuditLog> findByOrganizationMembers(@Param("orgId") String orgId, Pageable pageable);
+
+    /**
+     * Per-member rollup for the PDF activity report: [userId, totalRequests, blocked,
+     * totalTokens, suspiciousCount, maliciousCount, avgJailbreakScore]. Aggregated
+     * counts only — never raw prompt/response content (OWASP LLM #06).
+     */
+    @Query("SELECT a.userId, COUNT(a), " +
+           "SUM(CASE WHEN a.outcome <> 'SUCCESS' THEN 1 ELSE 0 END), " +
+           "SUM(a.promptTokens + a.completionTokens), " +
+           "SUM(CASE WHEN a.intentClassification = 'SUSPICIOUS' THEN 1 ELSE 0 END), " +
+           "SUM(CASE WHEN a.intentClassification = 'MALICIOUS' THEN 1 ELSE 0 END), " +
+           "AVG(a.jailbreakScore) " +
+           "FROM AuditLog a WHERE a.createdAt > :since " +
+           "AND a.userId IN (SELECT u.username FROM GatewayUser u WHERE u.organizationId = :orgId) " +
+           "GROUP BY a.userId")
+    List<Object[]> memberStatsForOrganization(@Param("orgId") String orgId, @Param("since") Instant since);
 }

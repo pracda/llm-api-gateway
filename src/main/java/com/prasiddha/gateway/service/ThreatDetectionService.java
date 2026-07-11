@@ -34,6 +34,7 @@ public class ThreatDetectionService {
     private final StringRedisTemplate redis;
     private final SecurityAlertRepository securityAlertRepository;
     private final RealtimeEventPublisher eventPublisher;
+    private final AlertNotificationService alertNotificationService;
 
     @Value("${app.security.threat-detection.window-seconds}")
     private long windowSeconds;
@@ -51,6 +52,10 @@ public class ThreatDetectionService {
     private long distinctIpThreshold;
     @Value("${app.security.threat-detection.coordinated-attack-user-threshold}")
     private long coordinatedAttackUserThreshold;
+    @Value("${app.security.threat-detection.extraction-suspicion-window-seconds}")
+    private long extractionSuspicionWindowSeconds;
+    @Value("${app.security.threat-detection.extraction-suspicion-threshold}")
+    private long extractionSuspicionThreshold;
 
     // ── Public API ───────────────────────────────────────────────────────
 
@@ -171,6 +176,41 @@ public class ThreatDetectionService {
         }
     }
 
+    /**
+     * Sustained-success-volume signal — the practical, content-free proxy for
+     * "model extraction" abuse (OWASP LLM10). We don't own the underlying model
+     * (it's the upstream provider's), so classic weight-extraction doesn't apply
+     * here; the real risk is a script hammering the API with a high volume of
+     * SUCCESSFUL calls to distill a copycat model. Rate-limit-abuse only fires on
+     * REJECTED requests, so a caller sitting just under the limit but sustaining
+     * it far longer than any normal chat session would never trip that signal —
+     * this is a distinct counter for exactly that shape. Alert-only, like
+     * COORDINATED_ATTACK: high volume alone isn't proof of theft, an admin
+     * should judge it, so it never auto-locks.
+     */
+    public void recordSuccess(String username) {
+        try {
+            String key = "threat:success-volume:" + username;
+            Long count = redis.opsForValue().increment(key);
+            if (count != null && count == 1) {
+                redis.expire(key, extractionSuspicionWindowSeconds, TimeUnit.SECONDS);
+            }
+            if (count != null && count >= extractionSuspicionThreshold) {
+                String dedupeKey = "threat:success-volume-alerted:" + username;
+                boolean firstAlert = Boolean.TRUE.equals(
+                    redis.opsForValue().setIfAbsent(dedupeKey, "1", extractionSuspicionWindowSeconds, TimeUnit.SECONDS));
+                if (firstAlert) {
+                    persistAndPublish(username, SecurityAlert.Type.MODEL_EXTRACTION_SUSPECTED, SecurityAlert.Severity.HIGH,
+                        username + " made " + count + " successful requests in " + extractionSuspicionWindowSeconds
+                            + "s — volume consistent with automated model extraction/distillation",
+                        false);
+                }
+            }
+        } catch (Exception e) {
+            log.error("Extraction-suspicion volume tracking failed, ignoring: {}", e.getMessage());
+        }
+    }
+
     // ── IP blocklist (dashboard "Block IP" action) ──────────────────────
 
     private static final String BLOCKED_IPS_KEY = "threat:blocked-ips";
@@ -221,6 +261,7 @@ public class ThreatDetectionService {
             .build();
         SecurityAlert saved = securityAlertRepository.save(alert);
         eventPublisher.publishAlert(saved);
+        alertNotificationService.notifyIfHighSeverity(saved);
         log.warn("SECURITY ALERT [{}] {} — {}", severity, type, message);
     }
 
@@ -236,7 +277,7 @@ public class ThreatDetectionService {
 
     private SecurityAlert.Severity severityFor(SecurityAlert.Type type) {
         return switch (type) {
-            case REPEATED_INJECTION, LOGIN_BRUTE_FORCE, PROMPT_LEAK_DETECTED, COORDINATED_ATTACK -> SecurityAlert.Severity.HIGH;
+            case REPEATED_INJECTION, LOGIN_BRUTE_FORCE, PROMPT_LEAK_DETECTED, COORDINATED_ATTACK, USER_MANUALLY_BLOCKED, MODEL_EXTRACTION_SUSPECTED -> SecurityAlert.Severity.HIGH;
             case REPEATED_OUTPUT_BLOCK, RATE_LIMIT_ABUSE, MULTI_IP_ACCESS, ELEVATED_JAILBREAK_SCORE -> SecurityAlert.Severity.MEDIUM;
             case KEY_EXPIRING, COMPETITOR_MENTION -> SecurityAlert.Severity.LOW;
         };

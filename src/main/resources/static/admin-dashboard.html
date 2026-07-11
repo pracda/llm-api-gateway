@@ -159,9 +159,19 @@
       <div id="orgDetail" style="display:none">
         <div class="row" style="margin-bottom:4px">
           <input id="memberUsername" type="text" placeholder="username to add as member" />
+          <input id="memberPassword" type="password" placeholder="password (optional — auto-generated if blank)" style="min-width:260px" />
           <button class="ghost" onclick="addMember()">Add member</button>
         </div>
-        <div class="empty" style="margin-bottom:10px">The username must already exist — have them register via /api/v1/auth/register first.</div>
+        <div class="empty" style="margin-bottom:10px">If the username doesn't exist yet, the account is created automatically — no separate registration step needed.</div>
+
+        <div id="newMemberBanner" class="key-banner">
+          <strong>New member account created — temporary password (copy it now):</strong>
+          <div class="row" style="margin-top:6px">
+            <code id="newMemberPasswordValue" style="word-break:break-all; flex:1"></code>
+            <button class="ghost" onclick="copyNewMemberPassword()">Copy</button>
+            <button class="ghost" onclick="dismissNewMemberBanner()">Dismiss</button>
+          </div>
+        </div>
 
         <div class="row" style="margin-bottom:10px; align-items:flex-end">
           <div class="field"><label>Username</label><input id="keyUsername" type="text" placeholder="org member" /></div>
@@ -195,6 +205,28 @@
           <tbody></tbody>
         </table>
         <div class="empty" id="orgKeysEmpty" style="display:none">No API keys issued yet for this organization.</div>
+
+        <div class="row" style="margin-top:16px; align-items:flex-end">
+          <div class="field"><label>Report period</label>
+            <select id="reportPeriod">
+              <option value="weekly">Weekly (7 days)</option>
+              <option value="monthly">Monthly (30 days)</option>
+            </select>
+          </div>
+          <button class="ghost" onclick="downloadOrgReport()">Download PDF report</button>
+        </div>
+
+        <h2 style="margin-top:16px">Trend (last 7 days)</h2>
+        <div class="timeline" id="orgTrendBars"></div>
+        <div class="timeline-labels" id="orgTrendLabels"></div>
+        <div class="row" id="orgTrendAlertTypes" style="margin-top:10px"></div>
+
+        <h2 style="margin-top:16px">Recent activity</h2>
+        <table class="data" id="orgLogsTable">
+          <thead><tr><th>User</th><th>Provider</th><th>Outcome</th><th>Intent</th><th>Tokens</th><th>When</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty" id="orgLogsEmpty" style="display:none">No activity recorded yet for this organization.</div>
       </div>
     </div>
 
@@ -212,6 +244,46 @@
         <tbody></tbody>
       </table>
       <div class="empty" id="riskEmpty" style="display:none">No elevated-risk users in the last 24h.</div>
+    </div>
+
+    <div class="card">
+      <h2>User evidence trail</h2>
+      <div class="row" style="margin-bottom:14px">
+        <input id="userLookupInput" type="text" placeholder="username" />
+        <button onclick="lookupUser()">Look up</button>
+      </div>
+
+      <div id="userActivityDetail" style="display:none">
+        <div class="row between" style="margin-bottom:10px">
+          <div><strong id="userActivityName"></strong> <span id="userActivityStatus"></span></div>
+          <button class="ghost" id="blockUserBtn" onclick="blockUser()">Block user</button>
+        </div>
+
+        <div class="tiles">
+          <div class="tile"><div class="label">Requests today</div><div class="value" id="uaRequestsToday">–</div></div>
+          <div class="tile"><div class="label">Trailing avg/day</div><div class="value" id="uaTrailingAvg">–</div></div>
+          <div class="tile"><div class="label">Tokens (24h)</div><div class="value" id="uaTokens">–</div></div>
+          <div class="tile"><div class="label">Avg jailbreak score (7d)</div><div class="value" id="uaAvgScore">–</div></div>
+        </div>
+
+        <div id="uaDeviationBanner" class="key-banner" style="border-color:var(--warning)"></div>
+
+        <div class="row" style="margin-bottom:10px" id="uaIntentBadges"></div>
+
+        <table class="data" id="uaAlertsTable">
+          <thead><tr><th>Severity</th><th>Type</th><th>Message</th><th>When</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty" id="uaAlertsEmpty" style="display:none">No alerts on record for this user.</div>
+
+        <h2 style="margin-top:16px">API keys</h2>
+        <table class="data" id="uaKeysTable">
+          <thead><tr><th>Name</th><th>Prefix</th><th>Tier</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty" id="uaKeysEmpty" style="display:none">No API keys for this user.</div>
+      </div>
+      <div class="empty" id="userLookupEmpty" style="display:none">User not found.</div>
     </div>
 
     <div class="card">
@@ -321,7 +393,8 @@
     currentOrgId = document.getElementById('orgSelect').value || null;
     document.getElementById('orgDetail').style.display = currentOrgId ? 'block' : 'none';
     dismissNewKeyBanner();
-    if (currentOrgId) refreshOrgKeys();
+    dismissNewMemberBanner();
+    if (currentOrgId) { refreshOrgKeys(); refreshOrgTrend(); refreshOrgLogs(); }
   };
 
   window.createOrg = function () {
@@ -341,10 +414,20 @@
   window.addMember = function () {
     if (!currentOrgId) return;
     var username = document.getElementById('memberUsername').value.trim();
+    var password = document.getElementById('memberPassword').value;
     if (!username) return;
-    api('/api/v1/admin/organizations/' + currentOrgId + '/members', { method: 'POST', body: JSON.stringify({ username: username }) })
-      .then(function () { document.getElementById('memberUsername').value = ''; })
-      .catch(function (e) { alert('Could not add member (is the username registered?): ' + e.message); });
+    var body = { username: username };
+    if (password) body.password = password;
+    api('/api/v1/admin/organizations/' + currentOrgId + '/members', { method: 'POST', body: JSON.stringify(body) })
+      .then(function (result) {
+        document.getElementById('memberUsername').value = '';
+        document.getElementById('memberPassword').value = '';
+        if (result.accountCreated && result.generatedPassword) {
+          document.getElementById('newMemberPasswordValue').textContent = result.generatedPassword;
+          document.getElementById('newMemberBanner').style.display = 'block';
+        }
+      })
+      .catch(function (e) { alert('Could not add member: ' + e.message); });
   };
 
   window.onTierChanged = function () {
@@ -389,6 +472,94 @@
   window.dismissNewKeyBanner = function () {
     document.getElementById('newKeyBanner').style.display = 'none';
     document.getElementById('newKeyValue').textContent = '';
+  };
+
+  window.copyNewMemberPassword = function () {
+    var text = document.getElementById('newMemberPasswordValue').textContent;
+    if (text && navigator.clipboard) navigator.clipboard.writeText(text);
+  };
+
+  window.dismissNewMemberBanner = function () {
+    document.getElementById('newMemberBanner').style.display = 'none';
+    document.getElementById('newMemberPasswordValue').textContent = '';
+  };
+
+  function refreshOrgTrend() {
+    if (!currentOrgId) return;
+    api('/api/v1/admin/organizations/' + currentOrgId + '/trend?days=7').then(function (d) {
+      var days = d.days || [];
+      var max = Math.max.apply(null, days.map(function (x) { return x.totalRequests; }).concat([1]));
+      var barsEl = document.getElementById('orgTrendBars');
+      var labelsEl = document.getElementById('orgTrendLabels');
+      barsEl.innerHTML = '';
+      labelsEl.innerHTML = '';
+      days.forEach(function (day) {
+        var bar = document.createElement('div');
+        bar.className = 'bar';
+        bar.style.height = Math.max(2, Math.round((day.totalRequests / max) * 56)) + 'px';
+        if (day.blocked > 0) bar.style.background = 'var(--serious)';
+        bar.title = day.date + ': ' + day.totalRequests + ' requests, ' + day.blocked + ' blocked, ' + day.totalTokens + ' tokens';
+        barsEl.appendChild(bar);
+        var lbl = document.createElement('span');
+        lbl.textContent = day.date.slice(5); // MM-DD
+        labelsEl.appendChild(lbl);
+      });
+
+      var alertTypesEl = document.getElementById('orgTrendAlertTypes');
+      var topTypes = d.topAlertTypes || [];
+      alertTypesEl.innerHTML = topTypes.length
+        ? topTypes.map(function (t) {
+            return '<span class="badge MEDIUM">' + t.label + ': ' + t.count + '</span>';
+          }).join(' ')
+        : '<span class="empty">No alerts in the last 7 days.</span>';
+    }).catch(function () {});
+  }
+
+  function refreshOrgLogs() {
+    if (!currentOrgId) return;
+    api('/api/v1/admin/organizations/' + currentOrgId + '/logs?size=15').then(function (page) {
+      var tbody = document.querySelector('#orgLogsTable tbody');
+      tbody.innerHTML = '';
+      var logs = page.content || [];
+      document.getElementById('orgLogsEmpty').style.display = logs.length ? 'none' : 'block';
+      logs.forEach(function (l) {
+        var intentBadge = l.intentClassification && l.intentClassification !== 'NORMAL'
+          ? '<span class="badge ' + (l.intentClassification === 'MALICIOUS' ? 'CRITICAL' : 'MEDIUM') + '">' + l.intentClassification + '</span>'
+          : l.intentClassification || '';
+        var tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td>' + l.userId + '</td>' +
+          '<td>' + (l.provider || '') + '</td>' +
+          '<td>' + l.outcome + '</td>' +
+          '<td>' + intentBadge + '</td>' +
+          '<td>' + (l.promptTokens + l.completionTokens) + '</td>' +
+          '<td>' + new Date(l.createdAt).toLocaleString() + '</td>';
+        tbody.appendChild(tr);
+      });
+    }).catch(function () {});
+  }
+
+  window.downloadOrgReport = function () {
+    if (!currentOrgId) return;
+    var period = document.getElementById('reportPeriod').value;
+    fetch('/api/v1/admin/organizations/' + currentOrgId + '/report?period=' + period, {
+      headers: { 'Authorization': 'Bearer ' + token }
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error('Report generation failed: ' + res.status);
+        return res.blob();
+      })
+      .then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'gateway-report-' + period + '.pdf';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      })
+      .catch(function (e) { alert('Could not download report: ' + e.message); });
   };
 
   function refreshOrgKeys() {
@@ -451,12 +622,15 @@
       else if (evt.outcome === 'BLOCKED_RATE_LIMIT') { label = '🔴 RATE LIMITED'; cls = 'serious'; }
       else if (evt.jailbreakScore >= 50) { label = '⚠️ FLAGGED'; cls = 'warning'; }
       else { label = '🚫 BLOCKED'; cls = 'critical'; }
+      var intentTag = evt.intentClassification && evt.intentClassification !== 'NORMAL'
+        ? ' <span class="badge ' + (evt.intentClassification === 'MALICIOUS' ? 'CRITICAL' : 'MEDIUM') + '">' + evt.intentClassification + '</span>'
+        : '';
       meta = (evt.provider || '') + ' ' + (evt.model || '') + ' · ' + evt.latencyMs + 'ms · ' +
-             (evt.promptTokens + evt.completionTokens) + ' tokens' + (evt.blockReason ? ' · ' + evt.blockReason : '');
+             (evt.promptTokens + evt.completionTokens) + ' tokens' + (evt.blockReason ? ' · ' + evt.blockReason : '') + intentTag;
     } else {
       label = '⚠️ ' + evt.severity;
       cls = evt.severity === 'HIGH' ? 'critical' : evt.severity === 'MEDIUM' ? 'warning' : 'good';
-      meta = evt.type + ' · ' + evt.message;
+      meta = (evt.label || evt.type) + ' · ' + evt.message;
     }
 
     li.innerHTML = '<span class="status-label ' + cls + '">' + label + '</span>' +
@@ -490,7 +664,7 @@
           : '';
         tr.innerHTML =
           '<td><span class="badge ' + a.severity + '">' + a.severity + '</span></td>' +
-          '<td>' + a.type + (a.username ? ' — ' + a.username : '') + '</td>' +
+          '<td>' + a.label + (a.username ? ' — ' + a.username : '') + '</td>' +
           '<td>' + a.message + '</td>' +
           '<td>' + unlockBtn + '<button class="ghost" onclick="acknowledgeAlert(\'' + a.id + '\')">Acknowledge</button></td>';
         tbody.appendChild(tr);
@@ -517,7 +691,7 @@
           ? '<span class="badge CRITICAL">LOCKED</span> <button class="ghost" onclick="unlockUser(\'' + r.username + '\')">Unlock</button>'
           : '';
         tr.innerHTML =
-          '<td><strong>' + r.username + '</strong></td>' +
+          '<td><a href="#" onclick="lookupUser(\'' + r.username + '\'); return false;">' + r.username + '</a></td>' +
           '<td><span class="badge ' + r.severity + '">' + r.score + '/100</span></td>' +
           '<td class="reasons">' + (r.reasons || []).join(' · ') + '</td>' +
           '<td>' + lockBtn + '</td>';
@@ -525,6 +699,91 @@
       });
     }).catch(function () {});
   }
+
+  // ── User evidence trail ───────────────────────────────────────────────
+
+  var currentLookupUsername = null;
+  var INTENT_BADGE = { NORMAL: 'LOW', SUSPICIOUS: 'MEDIUM', MALICIOUS: 'CRITICAL' };
+
+  window.lookupUser = function (presetUsername) {
+    var username = presetUsername || document.getElementById('userLookupInput').value.trim();
+    if (!username) return;
+    document.getElementById('userLookupInput').value = username;
+
+    api('/api/v1/admin/users/' + encodeURIComponent(username) + '/activity')
+      .then(function (d) { currentLookupUsername = username; renderUserActivity(d); })
+      .catch(function () {
+        document.getElementById('userActivityDetail').style.display = 'none';
+        document.getElementById('userLookupEmpty').style.display = 'block';
+      });
+  };
+
+  function renderUserActivity(d) {
+    document.getElementById('userLookupEmpty').style.display = 'none';
+    document.getElementById('userActivityDetail').style.display = 'block';
+
+    document.getElementById('userActivityName').textContent = d.username;
+    var statusBits = [];
+    if (!d.enabled) statusBits.push('<span class="badge CRITICAL">BLOCKED</span>');
+    if (d.locked) statusBits.push('<span class="badge HIGH">LOCKED (' + d.lockoutRemainingSeconds + 's)</span>');
+    document.getElementById('userActivityStatus').innerHTML = statusBits.join(' ');
+    document.getElementById('blockUserBtn').style.display = d.enabled ? 'inline-block' : 'none';
+
+    document.getElementById('uaRequestsToday').textContent = d.requestsToday;
+    document.getElementById('uaTrailingAvg').textContent = d.trailingAvgRequestsPerDay;
+    document.getElementById('uaTokens').textContent = d.tokensLast24h;
+    document.getElementById('uaAvgScore').textContent = d.avgJailbreakScoreLast7d + '/100';
+
+    var banner = document.getElementById('uaDeviationBanner');
+    if (d.volumeDeviationDetected) {
+      banner.style.display = 'block';
+      banner.textContent = 'Volume anomaly: ' + d.volumeDeviationReason;
+    } else {
+      banner.style.display = 'none';
+    }
+
+    var badges = document.getElementById('uaIntentBadges');
+    badges.innerHTML = Object.keys(d.intentBreakdownLast7d || {}).map(function (k) {
+      return '<span class="badge ' + (INTENT_BADGE[k] || 'LOW') + '">' + k + ': ' + d.intentBreakdownLast7d[k] + '</span>';
+    }).join(' ');
+
+    var alertsBody = document.querySelector('#uaAlertsTable tbody');
+    alertsBody.innerHTML = '';
+    var alerts = d.recentAlerts || [];
+    document.getElementById('uaAlertsEmpty').style.display = alerts.length ? 'none' : 'block';
+    alerts.forEach(function (a) {
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td><span class="badge ' + a.severity + '">' + a.severity + '</span></td>' +
+        '<td>' + a.label + '</td>' +
+        '<td>' + a.message + '</td>' +
+        '<td>' + new Date(a.createdAt).toLocaleString() + '</td>';
+      alertsBody.appendChild(tr);
+    });
+
+    var keysBody = document.querySelector('#uaKeysTable tbody');
+    keysBody.innerHTML = '';
+    var keys = d.apiKeys || [];
+    document.getElementById('uaKeysEmpty').style.display = keys.length ? 'none' : 'block';
+    keys.forEach(function (k) {
+      var statusBadge = k.status === 'ACTIVE' ? 'LOW' : k.status === 'SUSPENDED' ? 'MEDIUM' : 'CRITICAL';
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>' + k.name + '</td>' +
+        '<td><code>' + k.keyPrefix + '…</code></td>' +
+        '<td>' + k.tier + '</td>' +
+        '<td><span class="badge ' + statusBadge + '">' + k.status + '</span></td>';
+      keysBody.appendChild(tr);
+    });
+  }
+
+  window.blockUser = function () {
+    if (!currentLookupUsername) return;
+    if (!confirm('Permanently block ' + currentLookupUsername + '? This disables the account and revokes all its API keys. This cannot be undone from here.')) return;
+    api('/api/v1/admin/users/' + encodeURIComponent(currentLookupUsername) + '/block', { method: 'POST' })
+      .then(function () { lookupUser(currentLookupUsername); refreshRiskRankings(); })
+      .catch(function (e) { alert('Could not block user: ' + e.message); });
+  };
 
   function refreshTimeline() {
     api('/api/v1/admin/attack-timeline').then(function (buckets) {

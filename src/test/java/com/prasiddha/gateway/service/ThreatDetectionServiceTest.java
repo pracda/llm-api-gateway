@@ -21,6 +21,7 @@ class ThreatDetectionServiceTest {
     private ValueOperations<String, String> valueOps;
     private SecurityAlertRepository securityAlertRepository;
     private RealtimeEventPublisher eventPublisher;
+    private AlertNotificationService alertNotificationService;
     private ThreatDetectionService service;
 
     @BeforeEach
@@ -30,8 +31,9 @@ class ThreatDetectionServiceTest {
         when(redis.opsForValue()).thenReturn(valueOps);
         securityAlertRepository = mock(SecurityAlertRepository.class);
         eventPublisher = mock(RealtimeEventPublisher.class);
+        alertNotificationService = mock(AlertNotificationService.class);
 
-        service = new ThreatDetectionService(redis, securityAlertRepository, eventPublisher);
+        service = new ThreatDetectionService(redis, securityAlertRepository, eventPublisher, alertNotificationService);
         ReflectionTestUtils.setField(service, "windowSeconds", 300L);
         ReflectionTestUtils.setField(service, "lockoutSeconds", 900L);
         ReflectionTestUtils.setField(service, "injectionThreshold", 3L);
@@ -40,6 +42,8 @@ class ThreatDetectionServiceTest {
         ReflectionTestUtils.setField(service, "failedLoginThreshold", 5L);
         ReflectionTestUtils.setField(service, "distinctIpThreshold", 3L);
         ReflectionTestUtils.setField(service, "coordinatedAttackUserThreshold", 3L);
+        ReflectionTestUtils.setField(service, "extractionSuspicionWindowSeconds", 300L);
+        ReflectionTestUtils.setField(service, "extractionSuspicionThreshold", 100L);
 
         when(securityAlertRepository.save(any(SecurityAlert.class)))
             .thenAnswer(inv -> inv.getArgument(0));
@@ -107,5 +111,41 @@ class ThreatDetectionServiceTest {
 
         verify(securityAlertRepository, never()).save(any());
         verify(valueOps, never()).setIfAbsent(anyString(), anyString(), anyLong(), any());
+    }
+
+    @Test
+    @DisplayName("sustained successful-request volume raises a MODEL_EXTRACTION_SUSPECTED alert, alert-only (no lockout)")
+    void sustainedSuccessVolumeRaisesExtractionSuspicionAlert() {
+        when(valueOps.increment(anyString())).thenReturn(100L); // == extractionSuspicionThreshold
+        when(valueOps.setIfAbsent(anyString(), anyString(), anyLong(), any())).thenReturn(true);
+
+        service.recordSuccess("bob");
+
+        verify(securityAlertRepository, times(1)).save(argThat(a ->
+            a.getType() == SecurityAlert.Type.MODEL_EXTRACTION_SUSPECTED
+                && a.getSeverity() == SecurityAlert.Severity.HIGH
+                && !a.isAutoLockApplied()));
+        verify(eventPublisher, times(1)).publishAlert(any(SecurityAlert.class));
+    }
+
+    @Test
+    @DisplayName("below-threshold successful requests do not raise an extraction-suspicion alert")
+    void belowThresholdSuccessVolumeDoesNothing() {
+        when(valueOps.increment(anyString())).thenReturn(5L);
+
+        service.recordSuccess("bob");
+
+        verify(securityAlertRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("every persisted alert is forwarded to the webhook notifier (which itself decides severity/config)")
+    void everyPersistedAlertIsForwardedToWebhookNotifier() {
+        when(valueOps.increment(anyString())).thenReturn(3L);
+        when(valueOps.setIfAbsent(anyString(), anyString(), anyLong(), any())).thenReturn(true);
+
+        service.recordEvent("alice", SecurityAlert.Type.REPEATED_INJECTION);
+
+        verify(alertNotificationService, times(1)).notifyIfHighSeverity(any(SecurityAlert.class));
     }
 }

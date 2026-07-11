@@ -14,11 +14,17 @@ spring:
 
   jpa:
     hibernate:
-      ddl-auto: update
+      # Flyway now owns schema creation/migration (see db/migration) — Hibernate
+      # only validates the entities match what Flyway created.
+      ddl-auto: validate
     show-sql: false
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  flyway:
+    baseline-on-migrate: true
+    baseline-version: 1
 
   data:
     redis:
@@ -83,6 +89,8 @@ app:
       max-response-length: 10000        # chars — responses above this are truncated
     canary-token: ${CANARY_TOKEN:}      # blank = a random one is generated at boot
     competitor-keywords: "ChatGPT,Google Gemini,Microsoft Copilot"
+    # Slack-compatible incoming webhook for HIGH-severity alerts — blank disables it.
+    alert-webhook-url: ${ALERT_WEBHOOK_URL:}
 
     threat-detection:
       window-seconds: 300
@@ -93,6 +101,10 @@ app:
       failed-login-threshold: 5
       distinct-ip-threshold: 3
       coordinated-attack-user-threshold: 3
+      # Sustained-success-volume proxy for model-extraction/distillation abuse (OWASP LLM10) —
+      # see ThreatDetectionService.recordSuccess for why this is distinct from rate-limit-abuse.
+      extraction-suspicion-window-seconds: 300
+      extraction-suspicion-threshold: 100
 
 # ── Actuator ──────────────────────────────────────────────────────────────
 management:

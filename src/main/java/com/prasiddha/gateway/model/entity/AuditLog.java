@@ -64,6 +64,20 @@ public class AuditLog {
     @Column(nullable = false)
     private boolean streamed;
 
+    /**
+     * Bounded verdict derived from signals already computed elsewhere in the
+     * pipeline (block outcomes, lockout state, jailbreak score) — never from
+     * raw prompt/response content. See IntentClassificationService.
+     */
+    @Enumerated(EnumType.STRING)
+    @ColumnDefault("'NORMAL'")
+    @Column(nullable = false, length = 20)
+    private IntentClassification intentClassification;
+
+    /** Short, human-readable justification for the classification above — populated even on passing requests. */
+    @Column(length = 200)
+    private String intentReason;
+
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -77,5 +91,9 @@ public class AuditLog {
         BLOCKED_RATE_LIMIT,
         BLOCKED_AUTH,
         ERROR
+    }
+
+    public enum IntentClassification {
+        NORMAL, SUSPICIOUS, MALICIOUS
     }
 }

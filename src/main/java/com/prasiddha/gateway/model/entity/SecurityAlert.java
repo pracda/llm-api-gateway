@@ -58,7 +58,27 @@ public class SecurityAlert {
         PROMPT_LEAK_DETECTED,
         KEY_EXPIRING,
         ELEVATED_JAILBREAK_SCORE,
-        COMPETITOR_MENTION
+        COMPETITOR_MENTION,
+        USER_MANUALLY_BLOCKED,
+        MODEL_EXTRACTION_SUSPECTED;
+
+        /** Short, layman-readable label for the dashboard — the enum name itself is for logs/APIs only. */
+        public String friendlyLabel() {
+            return switch (this) {
+                case REPEATED_INJECTION          -> "Repeated prompt injection attempts";
+                case REPEATED_OUTPUT_BLOCK        -> "Repeated unsafe AI responses blocked";
+                case RATE_LIMIT_ABUSE             -> "Excessive request volume (rate limit abuse)";
+                case LOGIN_BRUTE_FORCE            -> "Repeated failed logins (possible brute force)";
+                case MULTI_IP_ACCESS              -> "Same account used from many different locations";
+                case COORDINATED_ATTACK           -> "Coordinated attack pattern across multiple accounts";
+                case PROMPT_LEAK_DETECTED         -> "System prompt leak detected";
+                case KEY_EXPIRING                 -> "API key expired";
+                case ELEVATED_JAILBREAK_SCORE     -> "Elevated jailbreak risk detected";
+                case COMPETITOR_MENTION           -> "Competitor mentioned in AI response";
+                case USER_MANUALLY_BLOCKED        -> "Account manually blocked by admin";
+                case MODEL_EXTRACTION_SUSPECTED   -> "Suspicious model extraction attempt detected";
+            };
+        }
     }
 
     public enum Severity { LOW, MEDIUM, HIGH }
