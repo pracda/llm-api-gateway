@@ -25,3 +25,9 @@ Thumbs.db
 logs/
 
 *.zip
+
+# ── AWS deploy state/secrets — generated at deploy time, never commit ─────
+# (.deployment-secrets.env already caught by *.env above)
+deploy/aws/.deployment-state.json
+deploy/aws/.rendered-user-data.sh
+deploy/aws/*.pem

@@ -1,0 +1,78 @@
+#!/bin/bash
+# EC2 first-boot bootstrap for the LLM Gateway - plain single-instance
+# deployment (no Elastic Beanstalk/ASG/ELB). Installs Docker, clones the
+# repo, writes a production .env, and runs the existing docker-compose.yml
+# stack (app + Postgres + Redis together on one box).
+set -e
+exec > /var/log/llm-gateway-bootstrap.log 2>&1
+
+dnf update -y
+dnf install -y docker git
+systemctl enable docker
+systemctl start docker
+
+# Amazon Linux 2023's docker package doesn't ship a compose-v2/buildx plugin
+# recent enough for `docker compose build` - install both manually as CLI plugins.
+mkdir -p /usr/libexec/docker/cli-plugins
+curl -sL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+    -o /usr/libexec/docker/cli-plugins/docker-compose
+chmod +x /usr/libexec/docker/cli-plugins/docker-compose
+
+BUILDX_URL=$(curl -s https://api.github.com/repos/docker/buildx/releases/latest \
+    | grep browser_download_url | grep linux-amd64 | grep -v '\.' | head -1 | cut -d '"' -f4)
+curl -sL "$BUILDX_URL" -o /usr/libexec/docker/cli-plugins/docker-buildx
+chmod +x /usr/libexec/docker/cli-plugins/docker-buildx
+
+REPO_DIR=/opt/llm-gateway
+rm -rf "$REPO_DIR"
+git clone --depth 1 https://github.com/pracda/llm-api-gateway.git "$REPO_DIR"
+
+cat > "$REPO_DIR/.env" << 'ENVEOF'
+OPENAI_API_KEY=__OPENAI_API_KEY__
+ANTHROPIC_API_KEY=__ANTHROPIC_API_KEY__
+JWT_SECRET=__JWT_SECRET__
+POSTGRES_DB=llmgateway
+POSTGRES_USER=gateway
+POSTGRES_PASSWORD=__POSTGRES_PASSWORD__
+REDIS_PASSWORD=__REDIS_PASSWORD__
+ADMIN_PASSWORD=__ADMIN_PASSWORD__
+CANARY_TOKEN=__CANARY_TOKEN__
+# The "prod" Spring profile defaults to ddl-auto: validate (expects the schema
+# to already exist) - there's no Flyway/Liquibase migration tool in this project
+# yet to bootstrap one, so a fresh database has no tables and validation fails.
+# Override to "update" for this single-instance deployment, matching how local
+# dev already runs; revisit if this project ever adds real migrations.
+SPRING_JPA_HIBERNATE_DDL_AUTO=update
+ENVEOF
+
+cd "$REPO_DIR"
+# --env-file explicit: Compose does NOT reliably auto-discover ../.env when
+# invoked with -f docker/docker-compose.yml from the parent directory - see
+# the comment at the top of docker-compose.yml for the full explanation.
+docker compose --env-file .env -f docker/docker-compose.yml up -d --build
+
+# Re-launch the stack on every instance reboot - this is a single plain EC2
+# instance (no Auto Scaling Group), so this systemd unit is what gives it
+# restart-on-reboot resilience instead.
+cat > /etc/systemd/system/llm-gateway.service << 'UNITEOF'
+[Unit]
+Description=LLM Gateway docker-compose stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/llm-gateway
+ExecStart=/usr/bin/docker compose --env-file .env -f docker/docker-compose.yml up -d
+ExecStop=/usr/bin/docker compose --env-file .env -f docker/docker-compose.yml down
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+
+systemctl daemon-reload
+systemctl enable llm-gateway.service
+
+echo "Bootstrap complete at $(date)"

@@ -1,3 +1,14 @@
+# NOTE: the ${VAR} interpolation used below (for POSTGRES_PASSWORD, REDIS_PASSWORD,
+# SPRING_DATASOURCE_* etc.) is resolved by Compose itself from a .env file — and
+# Compose does NOT reliably auto-discover ../.env when invoked as
+# `docker compose -f docker/docker-compose.yml ...` from the parent directory.
+# Always pass --env-file explicitly, e.g.:
+#   docker compose --env-file ../.env -f docker/docker-compose.yml up -d --build
+# (run from inside docker/), or the equivalent absolute path from anywhere else.
+# Without it, these silently fall back to their insecure `:-default` values, or
+# to an empty string where no default is given (JWT_SECRET) — an empty JWT
+# signing key fails loudly at boot (WeakKeyException), which is how this was
+# first caught.
 version: '3.9'
 
 services:
@@ -50,10 +61,11 @@ services:
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379
       SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_secret}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      JWT_SECRET: ${JWT_SECRET}
       SPRING_PROFILES_ACTIVE: prod
+      # OPENAI_API_KEY / ANTHROPIC_API_KEY / JWT_SECRET / ADMIN_PASSWORD / CANARY_TOKEN
+      # are plain passthroughs with the same name in .env as the container expects,
+      # so env_file alone supplies them correctly — no ${VAR} interpolation needed
+      # (and thus immune to the --env-file gotcha noted above).
     depends_on:
       postgres:
         condition: service_healthy
