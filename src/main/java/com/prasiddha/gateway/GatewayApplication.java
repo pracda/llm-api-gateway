@@ -5,6 +5,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
+import java.util.TimeZone;
+
 /**
  * Secure LLM API Gateway
  *
@@ -20,6 +22,16 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableAsync
 @EnableScheduling
 public class GatewayApplication {
+
+    // Runs on class-load (both `main()` at runtime and Spring's test bootstrapper for
+    // @SpringBootTest, since this class is the configuration source either way) — pins the
+    // JVM default timezone to UTC. Without this, java.sql.Timestamp round-trips through
+    // whatever timezone the host happens to be in, which can silently shift day-bucketed
+    // queries (audit log trend/report, "requests today") by several hours near local midnight.
+    static {
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
+    }
+
     public static void main(String[] args) {
         SpringApplication.run(GatewayApplication.class, args);
     }

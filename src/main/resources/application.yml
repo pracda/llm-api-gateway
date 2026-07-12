@@ -21,6 +21,12 @@ spring:
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
+        # Pin JDBC timestamp read/write to UTC — without this, Instant columns
+        # (e.g. AuditLog.createdAt) round-trip through the JVM's default
+        # timezone, which can shift day-bucketed queries near UTC midnight
+        # on any host not itself set to UTC.
+        jdbc:
+          time_zone: UTC
 
   flyway:
     baseline-on-migrate: true
