@@ -3,7 +3,7 @@
 [![CI / CD](https://github.com/pracda/llm-api-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/pracda/llm-api-gateway/actions/workflows/ci.yml)
 ![Java](https://img.shields.io/badge/Java-17-orange)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.2-brightgreen)
-![License](https://img.shields.io/badge/license-MIT-blue)
+
 
 A multi-tenant API gateway that sits in front of **OpenAI** and **Anthropic**, giving every team that calls an LLM through it centralized security, abuse detection, and usage visibility — without any of them touching a provider key directly.
 
@@ -258,4 +258,4 @@ docker/              # Dockerfile + docker-compose.yml (app + Postgres + Redis)
 
 ## License
 
-MIT
+PRASIDDHA
