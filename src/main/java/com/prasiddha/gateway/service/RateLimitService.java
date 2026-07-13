@@ -36,10 +36,34 @@ public class RateLimitService {
     @Value("${app.rate-limit.global-requests-per-minute}")
     private int globalRequestsPerMinute;
 
+    @Value("${app.rate-limit.auth-requests-per-minute}")
+    private int authRequestsPerMinute;
+
     private final StringRedisTemplate redis;
 
     public RateLimitService(StringRedisTemplate redis) {
         this.redis = redis;
+    }
+
+    /**
+     * Per-IP rate limit for pre-authentication endpoints (register/login), where no
+     * userId exists yet. keyPrefix distinguishes independent buckets per endpoint
+     * (e.g. "register" vs "token") since registration spam and login brute-force
+     * are different threat shapes.
+     */
+    public RateLimitResult checkIpLimit(String ip, String keyPrefix) {
+        try {
+            return checkWindow(
+                "rate:auth:" + keyPrefix + ":" + ip,
+                authRequestsPerMinute,
+                60L,
+                TimeUnit.SECONDS,
+                "auth-ip"
+            );
+        } catch (Exception e) {
+            log.error("Auth IP rate limit check failed, allowing request: {}", e.getMessage());
+            return RateLimitResult.allowed(-1);
+        }
     }
 
     public RateLimitResult checkLimit(String userId) {
@@ -77,6 +101,39 @@ public class RateLimitService {
             // Redis down — fail open (allow request) to avoid blocking all traffic
             log.error("Rate limit check failed, allowing request: {}", e.getMessage());
             return RateLimitResult.allowed(-1);
+        }
+    }
+
+    /**
+     * Current accumulated $ spend for an API key in the running 24h window — read-only,
+     * used for the PRE-call budget check (the exact cost of the current call isn't known
+     * until after the LLM responds, so only prior spend can be checked before dispatch).
+     */
+    public double getCurrentSpend(String apiKeyId) {
+        try {
+            String value = redis.opsForValue().get("spend:day:" + apiKeyId);
+            return value != null ? Double.parseDouble(value) : 0.0;
+        } catch (Exception e) {
+            log.error("Spend lookup failed, treating as zero: {}", e.getMessage());
+            return 0.0;
+        }
+    }
+
+    /**
+     * Records actual spend for a completed call — POST-call only. Naturally starts blocking
+     * the NEXT request once the running total crosses the budget cap (same count-then-check
+     * trade-off as checkWindow above).
+     */
+    public void recordSpend(String apiKeyId, double costUsd) {
+        if (costUsd <= 0) return;
+        try {
+            String key = "spend:day:" + apiKeyId;
+            Double total = redis.opsForValue().increment(key, costUsd); // Redis INCRBYFLOAT
+            if (total != null && total.doubleValue() == costUsd) {
+                redis.expire(key, 86400L, TimeUnit.SECONDS); // first write this window
+            }
+        } catch (Exception e) {
+            log.error("Spend recording failed for apiKeyId={}: {}", apiKeyId, e.getMessage());
         }
     }
 

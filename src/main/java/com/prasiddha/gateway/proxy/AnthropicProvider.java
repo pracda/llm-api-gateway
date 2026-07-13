@@ -85,10 +85,10 @@ public class AnthropicProvider implements LlmProvider {
 
         } catch (WebClientResponseException e) {
             log.error("Anthropic error: {} — {}", e.getStatusCode(), e.getResponseBodyAsString());
-            throw GatewayException.providerError("Anthropic");
+            throw GatewayException.providerError("Anthropic", e.getStatusCode().is5xxServerError());
         } catch (Exception e) {
             log.error("Anthropic call failed: {}", e.getMessage());
-            throw GatewayException.providerError("Anthropic");
+            throw GatewayException.providerError("Anthropic", true); // timeouts and other transport errors are retryable
         }
     }
 
@@ -134,7 +134,7 @@ public class AnthropicProvider implements LlmProvider {
                                 .totalTokens(inputTokens.get() + outputTokens)
                                 .build()));
                         }
-                        case "error" -> sink.error(GatewayException.providerError("Anthropic"));
+                        case "error" -> sink.error(GatewayException.providerError("Anthropic", true));
                         default -> { /* content_block_start/stop, message_stop, ping — nothing to forward */ }
                     }
                 } catch (Exception e) {
@@ -143,7 +143,7 @@ public class AnthropicProvider implements LlmProvider {
             })
             .onErrorMap(WebClientResponseException.class, e -> {
                 log.error("Anthropic stream error: {} — {}", e.getStatusCode(), e.getResponseBodyAsString());
-                return GatewayException.providerError("Anthropic");
+                return GatewayException.providerError("Anthropic", e.getStatusCode().is5xxServerError());
             });
     }
 

@@ -5,7 +5,7 @@ import lombok.Builder;
 import lombok.Data;
 
 /** Unified response — same shape regardless of which provider handled it */
-@Data @Builder
+@Data @Builder(toBuilder = true)
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class ChatResponse {
     private String requestId;
@@ -16,6 +16,10 @@ public class ChatResponse {
     private long latencyMs;
     /** True when the output scanner stripped or modified the response */
     private boolean outputSanitised;
+    /** Non-null only when a provider fallback occurred — the provider originally requested. */
+    private String requestedProvider;
+    /** True when the OTHER configured provider served this request after the requested one failed. */
+    private boolean fellBack;
 
     @Data @Builder
     public static class TokenUsage {

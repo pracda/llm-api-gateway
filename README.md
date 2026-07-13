@@ -23,8 +23,14 @@ Teams that wire LLM calls straight into their apps end up with provider keys sca
 - Input/output PII detection and redaction — emails, phone numbers, SSNs, card numbers, internal IPs
 - Output sanitisation against XSS, SQL/shell injection echoes, and leaked credentials (OWASP LLM05)
 - Canary-token system-prompt-leak detection with automatic API key revocation
-- Per-user / per-day / global rate limiting (Redis-backed sliding window)
+- Per-user / per-day / global rate limiting (Redis-backed sliding window), plus **per-IP rate limiting on `/auth/register` and `/auth/token`** to stop registration spam and distributed brute-force login attempts before they ever reach account-lockout logic
 - Sustained-success-volume detection for suspected model-extraction abuse (OWASP LLM10)
+- Model name allow-list per provider — an unrecognised `model` value fails fast with `400` instead of being forwarded to the provider API and coming back as a confusing `502`
+
+**Cost control & reliability**
+- Every request's $ cost is computed from actual token usage against configured per-model pricing (`app.llm.pricing`) and recorded on its audit log
+- Optional daily $ budget per API key (`dailyBudgetUsd`, tier-driven defaults) — hard-enforced with `402 Payment Required` once the running daily spend (tracked in Redis) crosses the cap
+- Automatic retry on transient provider failures (5xx/timeout), with **cross-provider fallback** (OpenAI ↔ Anthropic) if the primary provider keeps failing — the response always makes a fallback explicit via `requestedProvider`/`fellBack` fields rather than silently returning a different model's output. Streaming only retries before the first chunk is sent; it never falls back mid-stream, since already-delivered tokens can't be un-sent
 
 **Multi-tenancy & access control**
 - Organizations with Trial / Standard / Enterprise API key tiers (rate limits, token caps, expiry)
@@ -59,9 +65,12 @@ Client
 ├────────────────────────────────────────────────────────────────┤
 │ Rate limit — per-user / per-day / global (Redis)                │
 ├────────────────────────────────────────────────────────────────┤
+│ Budget check — reject if this key's daily $ spend is exceeded   │
+├────────────────────────────────────────────────────────────────┤
 │ Input scan — injection detection, jailbreak score, PII          │
 ├────────────────────────────────────────────────────────────────┤
-│ LLM call — OpenAI or Anthropic                                  │
+│ LLM call — OpenAI or Anthropic (model allow-list validated,     │
+│ retried on transient failure, falls back to the other provider) │
 ├────────────────────────────────────────────────────────────────┤
 │ Output scan — canary leak, PII redaction, unsafe content         │
 ├────────────────────────────────────────────────────────────────┤
@@ -74,7 +83,9 @@ Client
 Response to client  +  live event pushed to the admin dashboard
 ```
 
-A blocked request short-circuits at whichever stage caught it (429 for rate limits, 400 for injection/PII/unsafe output, 423 for a lockout, 403 for a blocked IP) — it's still logged with the reason and classified for the evidence trail.
+A blocked request short-circuits at whichever stage caught it (429 for rate limits, 402 for an exceeded daily budget, 400 for injection/PII/unsafe output/an invalid model, 423 for a lockout, 403 for a blocked IP) — it's still logged with the reason and classified for the evidence trail.
+
+The budget check can only see the running spend *prior* to this call — the exact cost of the in-flight request isn't known until the LLM responds — so it catches "already over budget," not "this specific call would tip you over." The actual cost is computed and recorded immediately after the LLM responds, which is what makes the *next* request the one that gets blocked.
 
 ## Tech stack
 
@@ -223,19 +234,25 @@ curl -X POST http://localhost:8080/api/v1/chat \
 | Improper Output Handling | Covered | `OutputScanService` — XSS/SQLi/shell-injection echo blocking |
 | Sensitive Information Disclosure | Covered | Prompts/responses never stored (hash only); input/output PII redaction |
 | System Prompt Leakage | Covered | Canary-token injection + detection, auto key revocation |
-| Unbounded Consumption / Model DoS | Covered | Multi-tier rate limiting, per-key token caps, extraction-volume detection |
+| Unbounded Consumption / Model DoS | Covered | Multi-tier rate limiting (including per-IP limits on auth endpoints), per-key token caps, per-key daily $ budget enforcement, extraction-volume detection |
 | Excessive Agency | Partially applicable | No tool-calling in this gateway; blast radius limited via tiered keys and manual block |
 | Supply Chain / Data Poisoning / Misinformation | Out of scope | Not applicable to a proxy gateway that doesn't train or host models |
 
 ## Testing
 
-Requires a local Maven install (there's no wrapper checked in) — tests run against an in-memory H2 database, no Docker services needed:
+Requires a local Maven install (there's no wrapper checked in). The main suite runs against an in-memory H2 database, no Docker services needed:
 
 ```bash
-mvn test
+mvn test -Dtest='!PostgresIntegrationTest'
 ```
 
 71 tests across unit and MockMvc integration suites — input/output scanning, threat detection and lockout logic, API key lifecycle, org/member provisioning, intent classification, PDF report generation, and auth boundary checks (JWT-only vs. API-key access to `/chat`).
+
+A separate Testcontainers-backed test validates the app against **real** PostgreSQL and Redis (not H2's Hibernate-generated schema) — this is what actually exercises the Flyway migrations end-to-end, including Postgres-specific column types that H2's `create-drop` mode can silently paper over. Requires Docker running locally:
+
+```bash
+mvn test -Dtest=PostgresIntegrationTest
+```
 
 ## Project structure
 

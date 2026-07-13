@@ -1,6 +1,7 @@
 package com.prasiddha.gateway.controller;
 
 import com.prasiddha.gateway.exception.GatewayException;
+import com.prasiddha.gateway.model.entity.ApiKey;
 import com.prasiddha.gateway.model.entity.AuditLog;
 import com.prasiddha.gateway.model.entity.SecurityAlert;
 import com.prasiddha.gateway.model.request.ChatRequest;
@@ -15,6 +16,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -58,6 +60,12 @@ public class ChatController {
     private final ThreatDetectionService threatDetectionService;
     private final ApiKeyService          apiKeyService;
     private final IntentClassificationService intentClassificationService;
+    private final CostCalculationService costCalculationService;
+
+    @Value("${app.llm.openai.default-model}")
+    private String openAiDefaultModel;
+    @Value("${app.llm.anthropic.default-model}")
+    private String anthropicDefaultModel;
 
     @PostMapping("/chat")
     @Operation(
@@ -110,6 +118,21 @@ public class ChatController {
                 .build();
         }
 
+        // ── 1b. Budget check (uses PRIOR accumulated spend — this call's exact cost isn't
+        // known until the LLM responds, so this can only catch "already over budget") ──────
+        ApiKey apiKey = apiKeyService.get(apiKeyId);
+        Double dailyBudgetUsd = apiKey.getDailyBudgetUsd();
+        if (dailyBudgetUsd != null && dailyBudgetUsd > 0) {
+            double currentSpend = rateLimitService.getCurrentSpend(apiKeyId);
+            if (currentSpend > dailyBudgetUsd) {
+                auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
+                    AuditLog.Outcome.BLOCKED_BUDGET_EXCEEDED,
+                    "Daily budget exceeded: $" + currentSpend + " / $" + dailyBudgetUsd,
+                    0, 0, elapsed(start), 402, false));
+                throw GatewayException.budgetExceeded(currentSpend, dailyBudgetUsd);
+            }
+        }
+
         // ── 2. Input scan (injection detection + jailbreak score) ──────
         InputScanService.ScanResult inputResult =
             inputScan.scan(request.getUserMessage(), request.getSystemPrompt());
@@ -141,8 +164,15 @@ public class ChatController {
         }
 
         // ── 3. Real LLM call (token budget capped by the caller's API key tier) ──
-        int maxTokens = apiKeyService.get(apiKeyId).getMaxTokensPerRequest();
+        int maxTokens = apiKey.getMaxTokensPerRequest();
         ChatResponse llmResponse = llmProxy.chat(request, maxTokens);
+
+        // Cost is incurred by the provider call regardless of what the output scan decides below,
+        // so it's computed and recorded here, once, and threaded into whichever audit log follows.
+        double costUsd = costCalculationService.computeCostUsd(
+            llmResponse.getProvider(), llmResponse.getModel(),
+            llmResponse.getUsage().getPromptTokens(), llmResponse.getUsage().getCompletionTokens());
+        rateLimitService.recordSpend(apiKeyId, costUsd);
 
         // ── 4. Output scan ─────────────────────────────────────────────
         OutputScanService.ScanResult outputResult =
@@ -160,7 +190,7 @@ public class ChatController {
                 outputResult.reason(),
                 llmResponse.getUsage().getPromptTokens(),
                 llmResponse.getUsage().getCompletionTokens(),
-                elapsed(start), 400, false));
+                elapsed(start), 400, false).toBuilder().costUsd(costUsd).build());
             throw GatewayException.unsafeOutput();
         }
 
@@ -175,15 +205,12 @@ public class ChatController {
             AuditLog.Outcome.SUCCESS, null,
             llmResponse.getUsage().getPromptTokens(),
             llmResponse.getUsage().getCompletionTokens(),
-            elapsed(start), 200, false, false, threatDetectionService.isLocked(username)));
+            elapsed(start), 200, false, false, threatDetectionService.isLocked(username))
+            .toBuilder().costUsd(costUsd).build());
 
         ChatResponse finalResponse = outputResult.isSanitised()
-            ? ChatResponse.builder()
-                .requestId(llmResponse.getRequestId())
+            ? llmResponse.toBuilder()
                 .content(outputResult.content())
-                .provider(llmResponse.getProvider())
-                .model(llmResponse.getModel())
-                .usage(llmResponse.getUsage())
                 .latencyMs(elapsed(start))
                 .outputSanitised(true)
                 .build()
@@ -243,6 +270,20 @@ public class ChatController {
             throw GatewayException.rateLimited(rateResult.retryAfterSeconds(), rateResult.limitType());
         }
 
+        // ── 1b. Budget check (uses PRIOR accumulated spend — see /chat for why) ──
+        ApiKey apiKey = apiKeyService.get(apiKeyId);
+        Double dailyBudgetUsd = apiKey.getDailyBudgetUsd();
+        if (dailyBudgetUsd != null && dailyBudgetUsd > 0) {
+            double currentSpend = rateLimitService.getCurrentSpend(apiKeyId);
+            if (currentSpend > dailyBudgetUsd) {
+                auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
+                    AuditLog.Outcome.BLOCKED_BUDGET_EXCEEDED,
+                    "Daily budget exceeded: $" + currentSpend + " / $" + dailyBudgetUsd,
+                    0, 0, elapsed(start), 402, true));
+                throw GatewayException.budgetExceeded(currentSpend, dailyBudgetUsd);
+            }
+        }
+
         // ── 2. Input scan (injection detection + jailbreak score) ──────
         InputScanService.ScanResult inputResult =
             inputScan.scan(request.getUserMessage(), request.getSystemPrompt());
@@ -273,7 +314,7 @@ public class ChatController {
         }
 
         // ── 3. Stream from the provider (token budget capped by the caller's API key tier) ──
-        int maxTokens = apiKeyService.get(apiKeyId).getMaxTokensPerRequest();
+        int maxTokens = apiKey.getMaxTokensPerRequest();
         int jailbreakScore = inputResult.jailbreakScore();
 
         SseEmitter emitter = new SseEmitter(0L);
@@ -322,6 +363,15 @@ public class ChatController {
                 int promptTokens     = usage != null ? usage.getPromptTokens() : 0;
                 int completionTokens = usage != null ? usage.getCompletionTokens() : 0;
 
+                // Streaming never returns a ChatResponse with the resolved model, so the
+                // provider default is looked up here the same way OpenAiProvider/AnthropicProvider
+                // resolve it internally.
+                String model = request.getModel() != null ? request.getModel()
+                    : request.getProvider() == ChatRequest.LlmProvider.OPENAI ? openAiDefaultModel : anthropicDefaultModel;
+                double costUsd = costCalculationService.computeCostUsd(
+                    request.getProvider().name(), model, promptTokens, completionTokens);
+                rateLimitService.recordSpend(apiKeyId, costUsd);
+
                 if (outputResult.isBlocked()) {
                     threatDetectionService.recordEvent(username, SecurityAlert.Type.REPEATED_OUTPUT_BLOCK);
                     if (outputResult.promptLeakDetected() && apiKeyId != null) {
@@ -339,7 +389,8 @@ public class ChatController {
                 threatDetectionService.recordSuccess(username);
                 auditService.log(buildAudit(username, request, apiKeyId, ip, jailbreakScore,
                     AuditLog.Outcome.SUCCESS, null, promptTokens, completionTokens, elapsed(start), 200, true,
-                    false, threatDetectionService.isLocked(username), outputResult.isBlocked()));
+                    false, threatDetectionService.isLocked(username), outputResult.isBlocked())
+                    .toBuilder().costUsd(costUsd).build());
 
                 try {
                     emitter.send(SseEmitter.event().data("[DONE]"));

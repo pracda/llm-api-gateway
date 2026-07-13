@@ -50,6 +50,10 @@ public class ApiKey {
     @Column(nullable = false)
     private int maxTokensPerRequest;
 
+    /** Null = unlimited. Enforced against running spend tracked in Redis (see RateLimitService). */
+    @Column(columnDefinition = "NUMERIC(10,2)")
+    private Double dailyBudgetUsd;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private Status status;

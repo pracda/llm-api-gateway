@@ -8,16 +8,23 @@ public class GatewayException extends RuntimeException {
     private final HttpStatus status;
     private final Long retryAfterSeconds;
     private final String limitType;
+    /** True when the failure is transient (e.g. a provider 5xx/timeout) and safe to retry or fall back on. */
+    private final boolean retryable;
 
     public GatewayException(String message, HttpStatus status) {
         this(message, status, null, null);
     }
 
     public GatewayException(String message, HttpStatus status, Long retryAfterSeconds, String limitType) {
+        this(message, status, retryAfterSeconds, limitType, false);
+    }
+
+    public GatewayException(String message, HttpStatus status, Long retryAfterSeconds, String limitType, boolean retryable) {
         super(message);
         this.status = status;
         this.retryAfterSeconds = retryAfterSeconds;
         this.limitType = limitType;
+        this.retryable = retryable;
     }
 
     /** Used by /chat/stream, whose SseEmitter-declared return type rules out the manual-ResponseEntity-with-headers approach /chat uses. */
@@ -47,6 +54,22 @@ public class GatewayException extends RuntimeException {
     }
 
     public static GatewayException providerError(String provider) {
-        return new GatewayException("LLM provider error from " + provider + ". Please try again.", HttpStatus.BAD_GATEWAY);
+        return providerError(provider, false);
+    }
+
+    public static GatewayException providerError(String provider, boolean retryable) {
+        return new GatewayException(
+            "LLM provider error from " + provider + ". Please try again.", HttpStatus.BAD_GATEWAY, null, null, retryable);
+    }
+
+    public static GatewayException invalidModel(String model, String provider) {
+        return new GatewayException(
+            "Model '" + model + "' is not permitted for provider " + provider, HttpStatus.BAD_REQUEST);
+    }
+
+    public static GatewayException budgetExceeded(double spentUsd, double budgetUsd) {
+        return new GatewayException(
+            "Daily budget exceeded: $" + String.format("%.4f", spentUsd) + " / $" + String.format("%.2f", budgetUsd),
+            HttpStatus.PAYMENT_REQUIRED);
     }
 }

@@ -78,10 +78,10 @@ public class OpenAiProvider implements LlmProvider {
 
         } catch (WebClientResponseException e) {
             log.error("OpenAI error: {} — {}", e.getStatusCode(), e.getResponseBodyAsString());
-            throw GatewayException.providerError("OpenAI");
+            throw GatewayException.providerError("OpenAI", e.getStatusCode().is5xxServerError());
         } catch (Exception e) {
             log.error("OpenAI call failed: {}", e.getMessage());
-            throw GatewayException.providerError("OpenAI");
+            throw GatewayException.providerError("OpenAI", true); // timeouts and other transport errors are retryable
         }
     }
 
@@ -104,7 +104,7 @@ public class OpenAiProvider implements LlmProvider {
             .mapNotNull(this::toStreamChunk)
             .onErrorMap(WebClientResponseException.class, e -> {
                 log.error("OpenAI stream error: {} — {}", e.getStatusCode(), e.getResponseBodyAsString());
-                return GatewayException.providerError("OpenAI");
+                return GatewayException.providerError("OpenAI", e.getStatusCode().is5xxServerError());
             });
     }
 

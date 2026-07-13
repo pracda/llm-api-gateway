@@ -44,6 +44,8 @@ public class ApiKeyService {
     private int trialMaxTokens;
     @Value("${app.api-keys.tiers.trial.expiry-days}")
     private int trialExpiryDays;
+    @Value("${app.api-keys.tiers.trial.daily-budget-usd:0}")
+    private double trialDailyBudgetUsd;
 
     @Value("${app.api-keys.tiers.standard.requests-per-day}")
     private int standardRequestsPerDay;
@@ -51,6 +53,8 @@ public class ApiKeyService {
     private int standardMaxTokens;
     @Value("${app.api-keys.tiers.standard.expiry-days}")
     private int standardExpiryDays;
+    @Value("${app.api-keys.tiers.standard.daily-budget-usd:0}")
+    private double standardDailyBudgetUsd;
 
     public CreatedKey create(
         String orgId, String username, ApiKey.Tier tier, String name, String adminUsername,
@@ -66,6 +70,7 @@ public class ApiKeyService {
         int requestsPerDay;
         int maxTokensPerRequest;
         Instant expiresAt;
+        Double dailyBudgetUsd;
 
         switch (tier) {
             case TRIAL -> {
@@ -73,12 +78,14 @@ public class ApiKeyService {
                 maxTokensPerRequest = maxTokensPerRequestOverride != null ? maxTokensPerRequestOverride : trialMaxTokens;
                 int days = expiresInDaysOverride != null ? expiresInDaysOverride : trialExpiryDays;
                 expiresAt = Instant.now().plus(days, ChronoUnit.DAYS);
+                dailyBudgetUsd = trialDailyBudgetUsd > 0 ? trialDailyBudgetUsd : null;
             }
             case STANDARD -> {
                 requestsPerDay = requestsPerDayOverride != null ? requestsPerDayOverride : standardRequestsPerDay;
                 maxTokensPerRequest = maxTokensPerRequestOverride != null ? maxTokensPerRequestOverride : standardMaxTokens;
                 int days = expiresInDaysOverride != null ? expiresInDaysOverride : standardExpiryDays;
                 expiresAt = Instant.now().plus(days, ChronoUnit.DAYS);
+                dailyBudgetUsd = standardDailyBudgetUsd > 0 ? standardDailyBudgetUsd : null;
             }
             case ENTERPRISE -> {
                 if (requestsPerDayOverride == null || maxTokensPerRequestOverride == null) {
@@ -90,6 +97,7 @@ public class ApiKeyService {
                 expiresAt = expiresInDaysOverride != null
                     ? Instant.now().plus(expiresInDaysOverride, ChronoUnit.DAYS)
                     : null;
+                dailyBudgetUsd = null; // Enterprise keys are unlimited unless set manually after creation
             }
             default -> throw new IllegalStateException("Unknown tier: " + tier);
         }
@@ -104,6 +112,7 @@ public class ApiKeyService {
             .tier(tier)
             .requestsPerDay(requestsPerDay)
             .maxTokensPerRequest(maxTokensPerRequest)
+            .dailyBudgetUsd(dailyBudgetUsd)
             .expiresAt(expiresAt)
             .createdByAdmin(adminUsername)
             .build();

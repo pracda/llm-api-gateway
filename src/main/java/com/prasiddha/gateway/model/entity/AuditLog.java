@@ -15,7 +15,7 @@ import java.time.Instant;
     @Index(name = "idx_audit_created",   columnList = "createdAt"),
     @Index(name = "idx_audit_outcome",   columnList = "outcome")
 })
-@Data @Builder @NoArgsConstructor @AllArgsConstructor
+@Data @Builder(toBuilder = true) @NoArgsConstructor @AllArgsConstructor
 public class AuditLog {
 
     @Id @GeneratedValue(strategy = GenerationType.UUID)
@@ -46,6 +46,11 @@ public class AuditLog {
     private int completionTokens;
     private long latencyMs;
     private int httpStatus;
+
+    /** Computed from token counts against configured per-model pricing (app.llm.pricing). 0 if the model has no configured price. */
+    @ColumnDefault("0")
+    @Column(nullable = false, columnDefinition = "NUMERIC(10,6)")
+    private double costUsd;
 
     /** 0-100 heuristic risk score from InputScanService — logged even when the request passes. */
     @ColumnDefault("0")
@@ -90,6 +95,7 @@ public class AuditLog {
         BLOCKED_OUTPUT_UNSAFE,     // OWASP LLM #05
         BLOCKED_RATE_LIMIT,
         BLOCKED_AUTH,
+        BLOCKED_BUDGET_EXCEEDED,
         ERROR
     }
 
