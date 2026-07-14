@@ -158,8 +158,18 @@ All admin endpoints require `ROLE_ADMIN`; `/chat` and `/chat/stream` require an 
 |---|---|---|---|
 | POST | `/api/v1/chat` | API key | Send a prompt, get a complete response |
 | POST | `/api/v1/chat/stream` | API key | Same, streamed token-by-token (SSE) |
+| GET | `/api/v1/models` | JWT or API key | List each provider's `default` model and `allowed` allow-list, so clients can discover valid `model` values instead of guessing and getting a `400` |
 | GET | `/api/v1/health` | JWT | Authenticated health check |
 | GET | `/actuator/health` | Public | Plain liveness check (used by Docker/deploy scripts) |
+
+`GET /api/v1/models` returns, e.g.:
+```json
+{
+  "OPENAI": { "default": "gpt-4o-mini", "allowed": ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] },
+  "ANTHROPIC": { "default": "claude-haiku-4-5-20251001", "allowed": ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-8"] }
+}
+```
+An empty `allowed` array for a provider means no explicit `model` string is currently accepted for it — a request can still omit `model` entirely to fall back to `default`. Unlike `/chat`, this endpoint accepts a JWT alone (no API key required), since it only needs *any* authenticated principal.
 
 **Admin — dashboard overview**
 | Method | Endpoint | Description |
