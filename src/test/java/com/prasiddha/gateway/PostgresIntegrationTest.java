@@ -68,7 +68,7 @@ class PostgresIntegrationTest {
         registry.add("app.llm.anthropic.api-key", () -> "test-anthropic-key");
         registry.add("app.llm.anthropic.base-url", () -> "https://api.anthropic.com");
         registry.add("app.llm.anthropic.api-version", () -> "2023-06-01");
-        registry.add("app.llm.anthropic.allowed-models", () -> "claude-3-haiku-20240307");
+        registry.add("app.llm.anthropic.allowed-models", () -> "claude-haiku-4-5-20251001");
     }
 
     @Autowired MockMvc mockMvc;

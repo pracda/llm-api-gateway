@@ -61,8 +61,8 @@ app:
       api-key: test-anthropic-key
       base-url: https://api.anthropic.com
       api-version: "2023-06-01"
-      default-model: claude-3-haiku-20240307
-      allowed-models: claude-3-haiku-20240307,claude-3-5-sonnet-20241022,claude-3-opus-20240229
+      default-model: claude-haiku-4-5-20251001
+      allowed-models: claude-haiku-4-5-20251001,claude-sonnet-5,claude-opus-4-8
       timeout-seconds: 5
     retry:
       max-retries: 2
@@ -75,9 +75,9 @@ app:
         gpt-4-turbo: { input-per-million: 10.00, output-per-million: 30.00 }
         gpt-3.5-turbo: { input-per-million: 0.50, output-per-million: 1.50 }
       anthropic:
-        claude-3-haiku-20240307: { input-per-million: 0.25, output-per-million: 1.25 }
-        claude-3-5-sonnet-20241022: { input-per-million: 3.00, output-per-million: 15.00 }
-        claude-3-opus-20240229: { input-per-million: 15.00, output-per-million: 75.00 }
+        claude-haiku-4-5-20251001: { input-per-million: 0.25, output-per-million: 1.25 }
+        claude-sonnet-5: { input-per-million: 3.00, output-per-million: 15.00 }
+        claude-opus-4-8: { input-per-million: 15.00, output-per-million: 75.00 }
 
   api-keys:
     tiers:
