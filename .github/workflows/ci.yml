@@ -29,7 +29,11 @@ jobs:
           cache: maven
 
       - name: Run tests
-        run: mvn verify -Dspring.profiles.active=test
+        # No forced profile: H2-based tests declare @ActiveProfiles("test")
+        # themselves, and PostgresIntegrationTest must run WITHOUT the test
+        # profile (it needs the real Postgres driver + Flyway against its
+        # Testcontainers database, not the profile's H2 override).
+        run: mvn verify
         env:
           OPENAI_API_KEY: test-key
           ANTHROPIC_API_KEY: test-key
