@@ -14,13 +14,25 @@ systemctl start docker
 # Amazon Linux 2023's docker package doesn't ship a compose-v2/buildx plugin
 # recent enough for `docker compose build` - install both manually as CLI plugins.
 mkdir -p /usr/libexec/docker/cli-plugins
-curl -sL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+# -f: fail loudly (non-zero exit, tripping `set -e`) on a 4xx/5xx response instead of
+# silently writing the error page's HTML as if it were the binary - bit us once already
+# with the buildx download below returning an empty URL that curl "succeeded" on.
+curl -sfL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
     -o /usr/libexec/docker/cli-plugins/docker-compose
 chmod +x /usr/libexec/docker/cli-plugins/docker-compose
 
-BUILDX_URL=$(curl -s https://api.github.com/repos/docker/buildx/releases/latest \
-    | grep browser_download_url | grep linux-amd64 | grep -v '\.' | head -1 | cut -d '"' -f4)
-curl -sL "$BUILDX_URL" -o /usr/libexec/docker/cli-plugins/docker-buildx
+# Pinned version + direct download URL - deliberately NOT scraping the GitHub
+# API for "latest" here. That approach (grep/cut over the releases API JSON)
+# broke a real deployment: buildx's actual binary asset name contains dots
+# too (e.g. buildx-v0.24.0.linux-amd64), so a "grep -v '\.'" filter meant to
+# exclude checksum/attestation sidecar files excluded the real binary as well,
+# leaving an empty URL - which curl failed on, which (via `set -e`) silently
+# killed the entire bootstrap before it ever got to cloning the repo. The
+# unauthenticated GitHub API's 60 req/hour rate limit was also a standing risk
+# for the same call. Bump BUILDX_VERSION by hand when a newer one is needed.
+BUILDX_VERSION="v0.19.3"
+curl -sfL "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64" \
+    -o /usr/libexec/docker/cli-plugins/docker-buildx
 chmod +x /usr/libexec/docker/cli-plugins/docker-buildx
 
 REPO_DIR=/opt/llm-gateway
