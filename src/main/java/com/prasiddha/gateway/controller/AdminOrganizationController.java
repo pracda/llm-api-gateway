@@ -6,6 +6,7 @@ import com.prasiddha.gateway.model.entity.Organization;
 import com.prasiddha.gateway.model.entity.SecurityAlert;
 import com.prasiddha.gateway.model.response.ApiKeyResponse;
 import com.prasiddha.gateway.model.response.AuditLogResponse;
+import com.prasiddha.gateway.model.response.CreateApiKeyResponse;
 import com.prasiddha.gateway.repository.AuditLogRepository;
 import com.prasiddha.gateway.repository.SecurityAlertRepository;
 import com.prasiddha.gateway.service.ApiKeyService;
@@ -239,9 +240,4 @@ public class AdminOrganizationController {
         }
     }
 
-    public record CreateApiKeyResponse(ApiKeyResponse key, String apiKey) {
-        static CreateApiKeyResponse from(ApiKeyService.CreatedKey created) {
-            return new CreateApiKeyResponse(ApiKeyResponse.from(created.apiKey()), created.rawKey());
-        }
-    }
 }

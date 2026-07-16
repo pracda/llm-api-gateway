@@ -151,7 +151,10 @@ All admin endpoints require `ROLE_ADMIN`; `/chat` and `/chat/stream` require an 
 | POST | `/api/v1/auth/register` | Public | Create an account |
 | POST | `/api/v1/auth/token` | Public | Exchange credentials for a JWT |
 | GET | `/api/v1/users/me` | JWT | Your account info |
+| POST | `/api/v1/users/me/api-keys` | JWT | **Self-service** — issue your own TRIAL-tier API key, no admin required. One per account; call again after this and you'll get a `400` pointing you at the list endpoint below instead of a second key |
 | GET | `/api/v1/users/me/api-keys` | JWT | Your issued API keys (masked) |
+
+Registering and getting a working API key is two calls, no admin involved: `POST /api/v1/auth/register` → `POST /api/v1/auth/token` (get a JWT) → `POST /api/v1/users/me/api-keys` (get your key, shown once). The first self-service call also silently creates a personal organization for you — you never need to think about organizations unless you outgrow the TRIAL tier and ask an admin for more.
 
 **Gateway**
 | Method | Endpoint | Auth | Description |
@@ -216,18 +219,26 @@ An empty `allowed` array for a provider means no explicit `model` string is curr
 
 ## Example request
 
+Fully self-service — no admin involved:
+
 ```bash
-# 1. Register an admin creates you as an org member (or self-register directly)
+# 1. Register
 curl -X POST http://localhost:8080/api/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{"username":"prasiddha","password":"yourpassword"}'
 
-# 2. An admin issues you an API key via the dashboard or:
-#    POST /api/v1/admin/organizations/{id}/api-keys  { "username": "prasiddha", "tier": "TRIAL", "name": "laptop" }
+# 2. Log in for a JWT
+JWT=$(curl -s -X POST http://localhost:8080/api/v1/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"username":"prasiddha","password":"yourpassword"}' | jq -r .token)
 
-# 3. Call the gateway with the issued key
+# 3. Issue your own TRIAL-tier API key — shown once, save it now
+API_KEY=$(curl -s -X POST http://localhost:8080/api/v1/users/me/api-keys \
+  -H "Authorization: Bearer $JWT" | jq -r .apiKey)
+
+# 4. Call the gateway with your key
 curl -X POST http://localhost:8080/api/v1/chat \
-  -H "X-API-Key: gw_live_..." \
+  -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "provider": "OPENAI",
@@ -235,6 +246,8 @@ curl -X POST http://localhost:8080/api/v1/chat \
     "userMessage": "Explain prompt injection in one paragraph."
   }'
 ```
+
+Need more than TRIAL limits? An admin can still issue STANDARD/ENTERPRISE-tier keys directly via `POST /api/v1/admin/organizations/{id}/api-keys` — see the API reference above.
 
 ## OWASP Top 10 for LLM Applications — coverage
 

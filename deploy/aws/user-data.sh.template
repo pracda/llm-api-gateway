@@ -37,12 +37,11 @@ POSTGRES_PASSWORD=__POSTGRES_PASSWORD__
 REDIS_PASSWORD=__REDIS_PASSWORD__
 ADMIN_PASSWORD=__ADMIN_PASSWORD__
 CANARY_TOKEN=__CANARY_TOKEN__
-# The "prod" Spring profile defaults to ddl-auto: validate (expects the schema
-# to already exist) - there's no Flyway/Liquibase migration tool in this project
-# yet to bootstrap one, so a fresh database has no tables and validation fails.
-# Override to "update" for this single-instance deployment, matching how local
-# dev already runs; revisit if this project ever adds real migrations.
-SPRING_JPA_HIBERNATE_DDL_AUTO=update
+# No ddl-auto override here on purpose: the "prod" Spring profile's real default
+# (ddl-auto: validate) is what should run. Flyway (spring.flyway.baseline-on-migrate)
+# creates the full schema from V1__baseline.sql forward on a fresh database - letting
+# Hibernate also auto-update the schema on top of that would fight Flyway and risk
+# exactly the kind of drift PostgresIntegrationTest exists to catch.
 ENVEOF
 
 cd "$REPO_DIR"

@@ -50,15 +50,35 @@ $subnetId = (aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpcId" --re
 $amiId    = (aws ec2 describe-images --owners amazon --filters "Name=name,Values=al2023-ami-2023*-x86_64" "Name=state,Values=available" --region $Region --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
 Write-Host "Using VPC=$vpcId Subnet=$subnetId AMI=$amiId InstanceType=$InstanceType" -ForegroundColor Cyan
 
+# SSH is scoped to whoever runs this script, not the whole internet - resolve that IP once up front.
+$callerIp = (Invoke-RestMethod -Uri "https://checkip.amazonaws.com").Trim()
+if ($callerIp -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') { throw "Could not resolve caller's public IP (got '$callerIp')." }
+$sshCidr = "$callerIp/32"
+Write-Host "Scoping SSH (port 22) to $sshCidr - re-run this script if your IP changes and you need SSH access again." -ForegroundColor Cyan
+
 # Security group (reuse if it already exists from a prior run)
 $sgId = (aws ec2 describe-security-groups --region $Region --filters "Name=group-name,Values=llm-gateway-sg" "Name=vpc-id,Values=$vpcId" --query 'SecurityGroups[0].GroupId' --output text)
 if (-not $sgId -or $sgId -eq "None") {
-    $sgId = (aws ec2 create-security-group --group-name llm-gateway-sg --description "LLM Gateway - app (8080) + SSH (22)" --vpc-id $vpcId --region $Region --query 'GroupId' --output text)
+    $sgId = (aws ec2 create-security-group --group-name llm-gateway-sg --description "LLM Gateway - app (8080, public) + SSH (22, caller IP only)" --vpc-id $vpcId --region $Region --query 'GroupId' --output text)
     aws ec2 authorize-security-group-ingress --group-id $sgId --protocol tcp --port 8080 --cidr 0.0.0.0/0 --region $Region | Out-Null
-    aws ec2 authorize-security-group-ingress --group-id $sgId --protocol tcp --port 22   --cidr 0.0.0.0/0 --region $Region | Out-Null
-    Write-Host "Created security group $sgId (8080 + 22 open to 0.0.0.0/0 - fine for a demo; tighten the CIDR for anything more sensitive)." -ForegroundColor Yellow
+    aws ec2 authorize-security-group-ingress --group-id $sgId --protocol tcp --port 22   --cidr $sshCidr   --region $Region | Out-Null
+    Write-Host "Created security group $sgId (8080 open to 0.0.0.0/0 - no domain/TLS yet, so the app itself must be publicly reachable; 22 restricted to $sshCidr)." -ForegroundColor Yellow
 } else {
-    Write-Host "Reusing existing security group $sgId" -ForegroundColor Cyan
+    Write-Host "Reusing existing security group $sgId - re-scoping its SSH rule to $sshCidr..." -ForegroundColor Cyan
+    # Revoke every existing port-22 rule (may be the old wide-open 0.0.0.0/0 from a prior version
+    # of this script, or a stale IP from a previous run) and re-authorize scoped to the current IP.
+    $existingSshRanges = aws ec2 describe-security-groups --group-ids $sgId --region $Region `
+        --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[].CidrIp" --output text
+    foreach ($cidr in ($existingSshRanges -split "\s+" | Where-Object { $_ })) {
+        if ($cidr -ne $sshCidr) {
+            aws ec2 revoke-security-group-ingress --group-id $sgId --protocol tcp --port 22 --cidr $cidr --region $Region | Out-Null
+            Write-Host "  revoked stale SSH rule for $cidr" -ForegroundColor Yellow
+        }
+    }
+    if ($existingSshRanges -notmatch [regex]::Escape($sshCidr)) {
+        aws ec2 authorize-security-group-ingress --group-id $sgId --protocol tcp --port 22 --cidr $sshCidr --region $Region | Out-Null
+        Write-Host "  authorized SSH for $sshCidr" -ForegroundColor Yellow
+    }
 }
 
 # Key pair (create if missing; private key saved locally, gitignored)
