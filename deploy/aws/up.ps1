@@ -67,8 +67,11 @@ if (-not $sgId -or $sgId -eq "None") {
     Write-Host "Reusing existing security group $sgId - re-scoping its SSH rule to $sshCidr..." -ForegroundColor Cyan
     # Revoke every existing port-22 rule (may be the old wide-open 0.0.0.0/0 from a prior version
     # of this script, or a stale IP from a previous run) and re-authorize scoped to the current IP.
+    # Single-quoted so PowerShell passes the JMESPath backticks through literally instead of
+    # trying to interpret them as its own escape character (that combination previously produced
+    # "Bad jmespath expression: Unknown token" and silently no-opped the revoke below).
     $existingSshRanges = aws ec2 describe-security-groups --group-ids $sgId --region $Region `
-        --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[].CidrIp" --output text
+        --query 'SecurityGroups[0].IpPermissions[?ToPort==`22`].IpRanges[].CidrIp' --output text
     foreach ($cidr in ($existingSshRanges -split "\s+" | Where-Object { $_ })) {
         if ($cidr -ne $sshCidr) {
             aws ec2 revoke-security-group-ingress --group-id $sgId --protocol tcp --port 22 --cidr $cidr --region $Region | Out-Null
