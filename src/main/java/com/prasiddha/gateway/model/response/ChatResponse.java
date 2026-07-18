@@ -31,6 +31,8 @@ public class ChatResponse {
     private boolean routed;
     /** Why the router picked this model: "simple_prompt" | "complex_prompt" | "elevated_risk" | "tier_capped" | "budget_floor". */
     private String routingReason;
+    /** True when this response was served from the cache at $0 instead of calling the provider (F2). */
+    private boolean cached;
 
     @Data @Builder
     public static class TokenUsage {

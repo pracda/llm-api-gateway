@@ -27,6 +27,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -62,6 +63,7 @@ public class ChatController {
     private final IntentClassificationService intentClassificationService;
     private final CostCalculationService costCalculationService;
     private final RoutingService routingService;
+    private final ResponseCacheService cacheService;
     private final FallbackProperties fallbackProperties;
 
     /**
@@ -205,6 +207,26 @@ public class ChatController {
         String routingReason = applyAutoRouting(
             request, apiKey, inputResult.jailbreakScore(), apiKeyId, budgetDegradeReason != null);
 
+        // ── 2d. Response cache (F2): serve identical/near-identical prompts at $0, no provider call ──
+        String cacheScopeKey = cacheService.isEnabled()
+            ? cacheService.scopeKey(apiKey.getOrganizationId(), apiKeyId) : null;
+        if (cacheScopeKey != null) {
+            Optional<ChatResponse> cached = cacheService.lookup(request, cacheScopeKey);
+            if (cached.isPresent()) {
+                ChatResponse hit = cached.get().toBuilder().latencyMs(elapsed(start)).build();
+                int pTok = hit.getUsage() != null ? hit.getUsage().getPromptTokens() : 0;
+                int cTok = hit.getUsage() != null ? hit.getUsage().getCompletionTokens() : 0;
+                threatDetectionService.recordSuccess(username);
+                auditService.log(buildAudit(username, request, apiKeyId, ip, inputResult.jailbreakScore(),
+                    AuditLog.Outcome.SUCCESS, null, pTok, cTok, elapsed(start), 200, false,
+                    false, threatDetectionService.isLocked(username)).toBuilder().costUsd(0.0).build());
+                return ResponseEntity.ok()
+                    .header("X-RateLimit-Remaining", String.valueOf(rateResult.remainingTokens()))
+                    .header("X-Cache", "HIT")
+                    .body(hit);
+            }
+        }
+
         // ── 3. Real LLM call (token budget capped by the caller's API key tier) ──
         int maxTokens = apiKey.getMaxTokensPerRequest();
         ChatResponse llmResponse = budgetDegradeReason != null
@@ -262,6 +284,15 @@ public class ChatController {
                 .outputSanitised(true)
                 .build()
             : llmResponse;
+
+        // ── 6. Cache the answer (F2) — only clean, non-modified, non-degraded responses ──
+        if (cacheScopeKey != null
+                && piiResult.content() == null            // prompt wasn't PII-redacted
+                && !outputResult.isSanitised()            // response wasn't stripped/modified
+                && !finalResponse.isDegraded()            // not a free-tier degraded answer
+                && !finalResponse.isFellBack()) {         // not a cross-provider fallback
+            cacheService.store(request, finalResponse, cacheScopeKey);
+        }
 
         // Add rate limit headers to every successful response
         return ResponseEntity.ok()

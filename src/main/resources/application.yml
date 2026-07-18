@@ -158,6 +158,19 @@ app:
         expiry-days: 90
         daily-budget-usd: 25.00
 
+  # ── Response caching (F2) — identical/near-identical prompts return at $0 ──
+  # Both layers OFF by default (enabling changes nothing until you opt in). The semantic layer
+  # additionally needs a Postgres image with the `vector` extension (e.g. pgvector/pgvector:pg16);
+  # it self-disables if unavailable, so turning it on can never break boot.
+  cache:
+    enabled: false            # exact-match (Redis) layer
+    semantic-enabled: false   # semantic (pgvector) layer — requires the vector extension
+    similarity-threshold: 0.93
+    ttl-seconds: 3600
+    scope: ORG                # ORG | KEY | GLOBAL (never share across orgs unless GLOBAL)
+    max-entries-per-scope: 1000
+    embedding-dim: 1536       # must match app.llm.embeddings.model (text-embedding-3-small = 1536)
+
   security:
     input:
       injection-detection-enabled: true
