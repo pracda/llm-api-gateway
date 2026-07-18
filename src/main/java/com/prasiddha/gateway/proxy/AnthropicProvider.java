@@ -89,7 +89,7 @@ public class AnthropicProvider implements LlmProvider {
 
         } catch (WebClientResponseException e) {
             log.error("{} error: {} — {}", name, e.getStatusCode(), e.getResponseBodyAsString());
-            throw GatewayException.providerError(name, e.getStatusCode().is5xxServerError());
+            throw GatewayException.fromProviderStatus(name, e.getStatusCode());
         } catch (Exception e) {
             log.error("{} call failed: {}", name, e.getMessage());
             throw GatewayException.providerError(name, true); // timeouts and other transport errors are retryable
@@ -147,7 +147,7 @@ public class AnthropicProvider implements LlmProvider {
             })
             .onErrorMap(WebClientResponseException.class, e -> {
                 log.error("{} stream error: {} — {}", name, e.getStatusCode(), e.getResponseBodyAsString());
-                return GatewayException.providerError(name, e.getStatusCode().is5xxServerError());
+                return GatewayException.fromProviderStatus(name, e.getStatusCode());
             });
     }
 

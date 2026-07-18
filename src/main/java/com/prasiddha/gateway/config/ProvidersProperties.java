@@ -44,5 +44,7 @@ public class ProvidersProperties {
         /** Explicit models a caller may request; empty = only the default (omit {@code model}). */
         private List<String> allowedModels = List.of();
         private int timeoutSeconds = 120;
+        /** True for $0 backends (Groq free tier, Ollama, …). The F6 ladder degrades to these. */
+        private boolean free = false;
     }
 }

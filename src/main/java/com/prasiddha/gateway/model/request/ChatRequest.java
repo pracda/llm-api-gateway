@@ -44,6 +44,21 @@ public class ChatRequest {
         return provider == null ? null : provider.trim().toLowerCase();
     }
 
+    /**
+     * Copy of this request for a fallback rung on a DIFFERENT provider (F6): the explicit
+     * {@code model} is dropped so the new provider uses its own default (the requested model
+     * is provider-specific and would 404 elsewhere). Prompt/history are carried over.
+     */
+    public ChatRequest copyForProvider() {
+        ChatRequest c = new ChatRequest();
+        c.setProvider(this.provider);
+        c.setModel(null);
+        c.setSystemPrompt(this.systemPrompt);
+        c.setUserMessage(this.userMessage);
+        c.setHistory(this.history);
+        return c;
+    }
+
     @Data
     public static class HistoryEntry {
         @NotBlank private String role;     // "user" or "assistant"

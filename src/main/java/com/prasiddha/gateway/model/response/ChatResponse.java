@@ -18,8 +18,15 @@ public class ChatResponse {
     private boolean outputSanitised;
     /** Non-null only when a provider fallback occurred — the provider originally requested. */
     private String requestedProvider;
-    /** True when the OTHER configured provider served this request after the requested one failed. */
+    /** True when a different provider served this request after the requested one failed. */
     private boolean fellBack;
+    /**
+     * True when a FREE provider served this request at $0 after a paid provider was
+     * usage-blocked or the caller's budget was exhausted (F6). Quality may be lower.
+     */
+    private boolean degraded;
+    /** Why degradation happened: "paid_quota_exhausted" | "daily_budget_exceeded". Null unless degraded. */
+    private String fallbackReason;
 
     @Data @Builder
     public static class TokenUsage {

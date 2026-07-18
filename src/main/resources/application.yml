@@ -78,10 +78,39 @@ app:
         default-model: claude-haiku-4-5-20251001
         allowed-models: [claude-haiku-4-5-20251001, claude-sonnet-5, claude-opus-4-8]
         timeout-seconds: 120
+      # ── Free ($0) providers for graceful degradation (F6) ──
+      # Disabled by default so the gateway boots without extra credentials/infra. Uncomment a
+      # block (and set its key / stand up Ollama) to enable free-tier degradation, then add the
+      # provider to app.llm.fallback.chain below. Mark them `free: true` and give $0 pricing.
+      # groq:
+      #   type: openai-compatible
+      #   base-url: https://api.groq.com/openai
+      #   api-key: ${GROQ_API_KEY:}
+      #   default-model: llama-3.1-8b-instant
+      #   allowed-models: [llama-3.1-8b-instant, llama-3.3-70b-versatile]
+      #   free: true
+      # ollama:
+      #   type: openai-compatible
+      #   base-url: http://localhost:11434       # no api-key needed for a local Ollama
+      #   default-model: llama3.1
+      #   allowed-models: [llama3.1]
+      #   free: true
     retry:
       max-retries: 2
       backoff-ms: 500
-      fallback-enabled: true   # automatic cross-provider fallback on retryable failure
+      fallback-enabled: true   # master switch for cross-provider laddering (F3a/F6)
+    # ── Free-LLM graceful degradation (F6) ──
+    fallback:
+      # Ordered fallback ladder. Empty = provider-registry declaration order. Put paid providers
+      # first and free ones last, e.g. [openai, anthropic, groq, ollama].
+      chain: []
+      # What to do when a caller's daily budget is exhausted: HARD_BLOCK (return 402, current
+      # behaviour) or DEGRADE_TO_FREE (serve a free provider at $0, flagged degraded).
+      on-budget-exhausted: HARD_BLOCK
+      # Optional per-tier override, e.g. let demo/trial keys degrade while paid tiers hard-block:
+      # budget-policy-by-tier:
+      #   TRIAL: DEGRADE_TO_FREE
+      #   STANDARD: HARD_BLOCK
     pricing:
       openai:
         gpt-4o-mini: { input-per-million: 0.15, output-per-million: 0.60 }

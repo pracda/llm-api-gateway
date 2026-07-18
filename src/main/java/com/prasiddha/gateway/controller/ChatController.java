@@ -1,5 +1,6 @@
 package com.prasiddha.gateway.controller;
 
+import com.prasiddha.gateway.config.FallbackProperties;
 import com.prasiddha.gateway.exception.GatewayException;
 import com.prasiddha.gateway.model.entity.ApiKey;
 import com.prasiddha.gateway.model.entity.AuditLog;
@@ -60,6 +61,19 @@ public class ChatController {
     private final ApiKeyService          apiKeyService;
     private final IntentClassificationService intentClassificationService;
     private final CostCalculationService costCalculationService;
+    private final FallbackProperties fallbackProperties;
+
+    /**
+     * Whether a budget-exhausted request for this key should degrade to a free provider (F6)
+     * instead of returning 402 — driven by the tier policy and gated on a free provider
+     * actually being configured. Returns the {@code fallbackReason} to use, or null for HARD_BLOCK.
+     */
+    private String budgetDegradeReason(ApiKey apiKey) {
+        String tier = apiKey.getTier() != null ? apiKey.getTier().name() : null;
+        boolean degrade = fallbackProperties.policyForTier(tier) == FallbackProperties.BudgetPolicy.DEGRADE_TO_FREE
+            && llmProxy.hasFreeProvider();
+        return degrade ? "daily_budget_exceeded" : null;
+    }
 
     @PostMapping("/chat")
     @Operation(
@@ -116,14 +130,20 @@ public class ChatController {
         // known until the LLM responds, so this can only catch "already over budget") ──────
         ApiKey apiKey = apiKeyService.get(apiKeyId);
         Double dailyBudgetUsd = apiKey.getDailyBudgetUsd();
+        // F6: when over budget, either hard-block (402) or degrade to a free provider per tier policy.
+        String budgetDegradeReason = null;
         if (dailyBudgetUsd != null && dailyBudgetUsd > 0) {
             double currentSpend = rateLimitService.getCurrentSpend(apiKeyId);
             if (currentSpend > dailyBudgetUsd) {
-                auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
-                    AuditLog.Outcome.BLOCKED_BUDGET_EXCEEDED,
-                    "Daily budget exceeded: $" + currentSpend + " / $" + dailyBudgetUsd,
-                    0, 0, elapsed(start), 402, false));
-                throw GatewayException.budgetExceeded(currentSpend, dailyBudgetUsd);
+                budgetDegradeReason = budgetDegradeReason(apiKey);
+                if (budgetDegradeReason == null) {
+                    auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
+                        AuditLog.Outcome.BLOCKED_BUDGET_EXCEEDED,
+                        "Daily budget exceeded: $" + currentSpend + " / $" + dailyBudgetUsd,
+                        0, 0, elapsed(start), 402, false));
+                    throw GatewayException.budgetExceeded(currentSpend, dailyBudgetUsd);
+                }
+                log.info("Budget exhausted for key {} — degrading to a free provider ($0)", apiKeyId);
             }
         }
 
@@ -159,7 +179,9 @@ public class ChatController {
 
         // ── 3. Real LLM call (token budget capped by the caller's API key tier) ──
         int maxTokens = apiKey.getMaxTokensPerRequest();
-        ChatResponse llmResponse = llmProxy.chat(request, maxTokens);
+        ChatResponse llmResponse = budgetDegradeReason != null
+            ? llmProxy.chatDegradedToFree(request, maxTokens, budgetDegradeReason)
+            : llmProxy.chat(request, maxTokens);
 
         // Cost is incurred by the provider call regardless of what the output scan decides below,
         // so it's computed and recorded here, once, and threaded into whichever audit log follows.
@@ -267,14 +289,20 @@ public class ChatController {
         // ── 1b. Budget check (uses PRIOR accumulated spend — see /chat for why) ──
         ApiKey apiKey = apiKeyService.get(apiKeyId);
         Double dailyBudgetUsd = apiKey.getDailyBudgetUsd();
+        // F6: hard-block (402) or degrade to a free provider per tier policy.
+        String budgetDegradeReason = null;
         if (dailyBudgetUsd != null && dailyBudgetUsd > 0) {
             double currentSpend = rateLimitService.getCurrentSpend(apiKeyId);
             if (currentSpend > dailyBudgetUsd) {
-                auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
-                    AuditLog.Outcome.BLOCKED_BUDGET_EXCEEDED,
-                    "Daily budget exceeded: $" + currentSpend + " / $" + dailyBudgetUsd,
-                    0, 0, elapsed(start), 402, true));
-                throw GatewayException.budgetExceeded(currentSpend, dailyBudgetUsd);
+                budgetDegradeReason = budgetDegradeReason(apiKey);
+                if (budgetDegradeReason == null) {
+                    auditService.log(buildAudit(username, request, apiKeyId, ip, 0,
+                        AuditLog.Outcome.BLOCKED_BUDGET_EXCEEDED,
+                        "Daily budget exceeded: $" + currentSpend + " / $" + dailyBudgetUsd,
+                        0, 0, elapsed(start), 402, true));
+                    throw GatewayException.budgetExceeded(currentSpend, dailyBudgetUsd);
+                }
+                log.info("Budget exhausted for key {} — streaming from a free provider ($0)", apiKeyId);
             }
         }
 
@@ -314,12 +342,18 @@ public class ChatController {
         SseEmitter emitter = new SseEmitter(0L);
         StringBuilder accumulated = new StringBuilder();
         AtomicReference<ChatResponse.TokenUsage> finalUsage = new AtomicReference<>();
+        // Which provider actually served (may switch to a free one before the first chunk, F6) —
+        // read back in the completion handler so cost is attributed to the real provider.
+        AtomicReference<String> servedProvider = new AtomicReference<>(request.providerKey());
 
         // Wire format is intentionally plain data:-only frames terminated by a literal
         // "data: [DONE]" (no named SSE events) — matches the OpenAI-style raw streaming
         // convention external clients commonly already parse. Token usage/outcome are still
         // fully captured server-side in the audit log regardless of what's sent over the wire.
-        llmProxy.streamChat(request, maxTokens).subscribe(
+        var stream = budgetDegradeReason != null
+            ? llmProxy.streamDegradedToFree(request, maxTokens, servedProvider)
+            : llmProxy.streamChat(request, maxTokens, servedProvider);
+        stream.subscribe(
             chunk -> {
                 try {
                     if (chunk.textDelta() != null) {
@@ -359,11 +393,14 @@ public class ChatController {
 
                 // Streaming never returns a ChatResponse with the resolved model, so the
                 // provider default is looked up here the same way the provider resolves it
-                // internally — now via the config-driven registry rather than per-provider @Values.
-                String model = request.getModel() != null ? request.getModel()
-                    : llmProxy.defaultModelFor(request.providerKey());
+                // internally. Cost is attributed to whichever provider ACTUALLY served — a free
+                // rung after a pre-first-chunk degrade is priced at $0 (F6).
+                String servedKey = servedProvider.get();
+                String model = (request.getModel() != null && servedKey.equalsIgnoreCase(request.providerKey()))
+                    ? request.getModel()
+                    : llmProxy.defaultModelFor(servedKey);
                 double costUsd = costCalculationService.computeCostUsd(
-                    request.providerKey(), model, promptTokens, completionTokens);
+                    servedKey, model, promptTokens, completionTokens);
                 rateLimitService.recordSpend(apiKeyId, costUsd);
 
                 if (outputResult.isBlocked()) {
