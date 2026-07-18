@@ -108,6 +108,14 @@ app:
       suspicious-score-threshold: 40      # jailbreak score >= this also routes to `complex`
       premium-tiers: [STANDARD, ENTERPRISE]   # TRIAL is capped to `simple`
       budget-floor-fraction: 0.15         # when <15% of the daily cap remains, force `simple`
+    # ── Shared embeddings source (F1 semantic detection; later F2 semantic cache) ──
+    # Any OpenAI-compatible /v1/embeddings endpoint. Point base-url at a local Ollama
+    # (http://localhost:11434, model nomic-embed-text) for a self-contained $0 setup.
+    embeddings:
+      base-url: https://api.openai.com
+      api-key: ${OPENAI_API_KEY:}
+      model: text-embedding-3-small
+      timeout-seconds: 10
     # ── Free-LLM graceful degradation (F6) ──
     fallback:
       # Ordered fallback ladder. Empty = provider-registry declaration order. Put paid providers
@@ -155,6 +163,17 @@ app:
       injection-detection-enabled: true
       block-on-detection: true          # false = log only (for testing)
       pii-action: REDACT                # REDACT or BLOCK
+      # ── Semantic injection detection (F1) — catches paraphrased jailbreaks regex misses ──
+      # Fail-open and content-free. Needs app.llm.embeddings configured (below). Runs only on
+      # regex-clean, non-trivial prompts, so the embedding cost is paid on a minority of traffic.
+      semantic:
+        enabled: true
+        similarity-threshold: 0.82      # cosine >= this → treated as a jailbreak match (block)
+        similarity-floor: 0.60          # below this contributes 0 to the score
+        weight: 60                      # max points the semantic pass can add
+        gray-zone-max: 59               # skip semantic if regex already scored this high
+        min-prompt-chars: 20            # skip trivially short prompts
+        corpus-resource: classpath:jailbreak-corpus.txt
     output:
       sanitisation-enabled: true
       block-on-unsafe-output: true      # false = log and strip only

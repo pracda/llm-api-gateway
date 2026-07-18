@@ -1,6 +1,7 @@
 package com.prasiddha.gateway.service;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -31,6 +32,21 @@ public class InputScanService {
     /** REDACT or BLOCK when PII is found in the user's prompt, before it's ever sent to the LLM. */
     @Value("${app.security.input.pii-action}")
     private String piiAction;
+
+    // ── Semantic layer (F1) — catches paraphrased injections the regex misses ──
+    @Value("${app.security.input.semantic.enabled:false}")
+    private boolean semanticEnabled;
+
+    /** Skip the semantic pass once the regex score is this high (already near/at a block). */
+    @Value("${app.security.input.semantic.gray-zone-max:59}")
+    private int semanticGrayZoneMax;
+
+    @Value("${app.security.input.semantic.min-prompt-chars:20}")
+    private int semanticMinPromptChars;
+
+    /** Optional so plain unit tests can construct InputScanService with {@code new}. */
+    @Autowired(required = false)
+    private SemanticInjectionService semanticService;
 
     // ── Injection patterns ────────────────────────────────────────────────
 
@@ -116,6 +132,25 @@ public class InputScanService {
             }
             score += 20;
             log.warn("INPUT SCAN — possible system prompt override attempt");
+        }
+
+        // 4. Semantic pass (F1) — only when regex left it un-blocked and in the gray zone.
+        // Fail-open: any embedder/corpus problem contributes 0 and never blocks.
+        if (semanticEnabled && semanticService != null && reason == null
+                && score <= semanticGrayZoneMax
+                && userMessage != null && userMessage.length() >= semanticMinPromptChars) {
+            SemanticInjectionService.SemanticResult sem = semanticService.score(userMessage);
+            if (sem.contribution() > 0) {
+                score += sem.contribution();
+                log.info("INPUT SCAN — semantic similarity {} added {} to score",
+                    String.format("%.2f", sem.similarity()), sem.contribution());
+            }
+            if (sem.matched()) {
+                reason = "Semantic similarity to a known jailbreak ("
+                    + Math.round(sem.similarity() * 100) + "%)";
+                log.warn("INPUT SCAN BLOCKED — semantic injection match, similarity={}",
+                    String.format("%.2f", sem.similarity()));
+            }
         }
 
         score = Math.min(score, 100);
