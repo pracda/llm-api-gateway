@@ -1,6 +1,7 @@
 package com.prasiddha.gateway.controller;
 
-import com.prasiddha.gateway.model.request.ChatRequest;
+import com.prasiddha.gateway.config.ProvidersProperties;
+import com.prasiddha.gateway.config.ProvidersProperties.ProviderConfig;
 import com.prasiddha.gateway.model.response.ProviderModels;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -9,7 +10,6 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -17,8 +17,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.Arrays;
-import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -26,7 +25,11 @@ import java.util.regex.Pattern;
 /**
  * Model discovery — lets clients ask which models this gateway accepts
  * instead of guessing and getting a 400 from the allow-list check in
- * LlmProxyService. The response mirrors the app.llm.* configuration.
+ * LlmProxyService. The response mirrors the app.llm.providers.* configuration.
+ *
+ * As of F3a the provider list is config-driven: response keys are the configured
+ * provider names (upper-cased for backward compatibility with the original
+ * OPENAI/ANTHROPIC keys), so newly-configured providers appear here automatically.
  *
  * Requires authentication (any principal — JWT or API key both satisfy
  * SecurityConfig's anyRequest().authenticated(), unlike /chat which needs
@@ -52,21 +55,10 @@ public class ModelsController {
      */
     private static final Pattern VALID_MODEL_ID = Pattern.compile("[A-Za-z0-9._-]+");
 
-    private final String openAiDefault;
-    private final List<String> openAiAllowed;
-    private final String anthropicDefault;
-    private final List<String> anthropicAllowed;
+    private final ProvidersProperties providersProperties;
 
-    public ModelsController(
-        @Value("${app.llm.openai.default-model}") String openAiDefault,
-        @Value("${app.llm.openai.allowed-models}") String openAiAllowedCsv,
-        @Value("${app.llm.anthropic.default-model}") String anthropicDefault,
-        @Value("${app.llm.anthropic.allowed-models}") String anthropicAllowedCsv
-    ) {
-        this.openAiDefault = requireConfigured("app.llm.openai.default-model", openAiDefault);
-        this.openAiAllowed = toValidatedList("app.llm.openai.allowed-models", openAiAllowedCsv);
-        this.anthropicDefault = requireConfigured("app.llm.anthropic.default-model", anthropicDefault);
-        this.anthropicAllowed = toValidatedList("app.llm.anthropic.allowed-models", anthropicAllowedCsv);
+    public ModelsController(ProvidersProperties providersProperties) {
+        this.providersProperties = providersProperties;
     }
 
     @GetMapping("/models")
@@ -77,7 +69,7 @@ public class ModelsController {
     )
     @ApiResponse(
         responseCode = "200",
-        description = "Keys are provider names (OPENAI, ANTHROPIC). Each value has a `default` "
+        description = "Keys are provider names (e.g. OPENAI, ANTHROPIC). Each value has a `default` "
             + "model (used when a chat request omits `model`) and `allowed` — the full "
             + "allow-list LlmProxyService validates an explicit `model` against. An empty "
             + "`allowed` array means no explicit model string is accepted for that provider "
@@ -86,19 +78,24 @@ public class ModelsController {
             "{\"OPENAI\":{\"default\":\"gpt-4o-mini\",\"allowed\":[\"gpt-4o-mini\",\"gpt-4o\"]},"
                 + "\"ANTHROPIC\":{\"default\":\"claude-haiku-4-5-20251001\",\"allowed\":[\"claude-haiku-4-5-20251001\"]}}"))
     )
-    public ResponseEntity<Map<ChatRequest.LlmProvider, ProviderModels>> models(
+    public ResponseEntity<Map<String, ProviderModels>> models(
         @AuthenticationPrincipal String username
     ) {
         log.debug("Model discovery requested by '{}'", username);
-        Map<ChatRequest.LlmProvider, ProviderModels> body = new EnumMap<>(ChatRequest.LlmProvider.class);
-        body.put(ChatRequest.LlmProvider.OPENAI, new ProviderModels(openAiDefault, openAiAllowed));
-        body.put(ChatRequest.LlmProvider.ANTHROPIC, new ProviderModels(anthropicDefault, anthropicAllowed));
+        Map<String, ProviderModels> body = new LinkedHashMap<>();
+        providersProperties.getProviders().forEach((name, cfg) -> {
+            String key = name.trim().toUpperCase();
+            body.put(key, new ProviderModels(
+                requireConfigured("app.llm.providers." + name + ".default-model", cfg.getDefaultModel()),
+                validatedModels("app.llm.providers." + name + ".allowed-models", cfg)
+            ));
+        });
         return ResponseEntity.ok(body);
     }
 
     /**
-     * Fails fast with a clear, property-specific message at startup rather than letting Spring
-     * throw an opaque BeanCreationException if app.llm.*.default-model is missing or blank.
+     * Fails fast with a clear, property-specific message at startup rather than letting a
+     * misconfigured provider silently return a null default model.
      */
     private static String requireConfigured(String propertyName, String value) {
         if (value == null || value.isBlank()) {
@@ -109,17 +106,15 @@ public class ModelsController {
     }
 
     /**
-     * Same fail-fast requirement as requireConfigured, plus filters out (with a warning log)
-     * any comma-separated entry that doesn't look like a plausible model ID — trailing/leading
-     * commas and whitespace are silently dropped (intentional), anything else malformed is
-     * dropped rather than echoed back to clients verbatim.
+     * Filters out (with a warning log) any allowed-models entry that doesn't look like a
+     * plausible model ID, so a misconfigured value never gets echoed back to clients verbatim.
      */
-    private static List<String> toValidatedList(String propertyName, String csv) {
-        if (csv == null) {
-            throw new IllegalStateException(
-                "Required property '" + propertyName + "' is missing — ModelsController cannot start without it.");
+    private static List<String> validatedModels(String propertyName, ProviderConfig cfg) {
+        List<String> models = cfg.getAllowedModels();
+        if (models == null) {
+            return List.of();
         }
-        return Arrays.stream(csv.split(","))
+        return models.stream()
             .map(String::trim)
             .filter(s -> !s.isEmpty())
             .filter(s -> {

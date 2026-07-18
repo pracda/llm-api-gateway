@@ -16,7 +16,6 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -61,11 +60,6 @@ public class ChatController {
     private final ApiKeyService          apiKeyService;
     private final IntentClassificationService intentClassificationService;
     private final CostCalculationService costCalculationService;
-
-    @Value("${app.llm.openai.default-model}")
-    private String openAiDefaultModel;
-    @Value("${app.llm.anthropic.default-model}")
-    private String anthropicDefaultModel;
 
     @PostMapping("/chat")
     @Operation(
@@ -364,12 +358,12 @@ public class ChatController {
                 int completionTokens = usage != null ? usage.getCompletionTokens() : 0;
 
                 // Streaming never returns a ChatResponse with the resolved model, so the
-                // provider default is looked up here the same way OpenAiProvider/AnthropicProvider
-                // resolve it internally.
+                // provider default is looked up here the same way the provider resolves it
+                // internally — now via the config-driven registry rather than per-provider @Values.
                 String model = request.getModel() != null ? request.getModel()
-                    : request.getProvider() == ChatRequest.LlmProvider.OPENAI ? openAiDefaultModel : anthropicDefaultModel;
+                    : llmProxy.defaultModelFor(request.providerKey());
                 double costUsd = costCalculationService.computeCostUsd(
-                    request.getProvider().name(), model, promptTokens, completionTokens);
+                    request.providerKey(), model, promptTokens, completionTokens);
                 rateLimitService.recordSpend(apiKeyId, costUsd);
 
                 if (outputResult.isBlocked()) {
@@ -457,7 +451,7 @@ public class ChatController {
             .ipAddress(ipAddress)
             .jailbreakScore(jailbreakScore)
             .promptHash(AuditService.hash(req.getUserMessage()))
-            .provider(req.getProvider().name())
+            .provider(req.providerKey())
             .model(req.getModel())
             .outcome(outcome)
             .blockReason(blockReason)

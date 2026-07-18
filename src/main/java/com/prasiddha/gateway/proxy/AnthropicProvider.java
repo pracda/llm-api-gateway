@@ -2,16 +2,15 @@ package com.prasiddha.gateway.proxy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.prasiddha.gateway.config.ProvidersProperties.ProviderConfig;
 import com.prasiddha.gateway.exception.GatewayException;
 import com.prasiddha.gateway.model.request.ChatRequest;
 import com.prasiddha.gateway.model.response.ChatResponse;
 import com.prasiddha.gateway.service.CanaryTokenProvider;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
-import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Flux;
@@ -23,10 +22,17 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * Anthropic Messages API provider. Kept separate from {@link OpenAiCompatibleProvider}
+ * because Anthropic's wire format (system field, content blocks, event-named SSE) differs
+ * from the OpenAI chat-completions shape. Not a Spring {@code @Component}; built per
+ * {@code app.llm.providers.<key>} entry of {@code type: anthropic} by
+ * {@code ProviderRegistrationConfig} (F3a).
+ */
 @Slf4j
-@Component
 public class AnthropicProvider implements LlmProvider {
 
+    private final String name;
     private final WebClient webClient;
     private final String apiKey;
     private final String baseUrl;
@@ -37,35 +43,33 @@ public class AnthropicProvider implements LlmProvider {
     private final ObjectMapper objectMapper;
 
     public AnthropicProvider(
+        String name,
+        ProviderConfig cfg,
         WebClient webClient,
-        @Value("${app.llm.anthropic.api-key}") String apiKey,
-        @Value("${app.llm.anthropic.base-url}") String baseUrl,
-        @Value("${app.llm.anthropic.api-version}") String apiVersion,
-        @Value("${app.llm.anthropic.default-model}") String defaultModel,
-        @Value("${app.llm.anthropic.timeout-seconds}") int timeoutSeconds,
         CanaryTokenProvider canaryTokenProvider,
         ObjectMapper objectMapper
     ) {
+        this.name           = name;
         this.webClient      = webClient;
-        this.apiKey         = apiKey;
-        this.baseUrl        = baseUrl;
-        this.apiVersion     = apiVersion;
-        this.defaultModel   = defaultModel;
-        this.timeoutSeconds = timeoutSeconds;
+        this.apiKey         = cfg.getApiKey();
+        this.baseUrl        = cfg.getBaseUrl();
+        this.apiVersion     = cfg.getApiVersion();
+        this.defaultModel   = cfg.getDefaultModel();
+        this.timeoutSeconds = cfg.getTimeoutSeconds();
         this.canaryTokenProvider = canaryTokenProvider;
         this.objectMapper   = objectMapper;
     }
 
     @Override
-    public ChatRequest.LlmProvider getProvider() {
-        return ChatRequest.LlmProvider.ANTHROPIC;
+    public String getProvider() {
+        return name;
     }
 
     @Override
     public ChatResponse chat(ChatRequest request, int maxTokens) {
         String model = request.getModel() != null ? request.getModel() : defaultModel;
         long start   = System.currentTimeMillis();
-        log.info("Calling Anthropic — model={}", model);
+        log.info("Calling {} — model={}", name, model);
 
         Map<String, Object> body = requestBody(request, model, maxTokens, false);
 
@@ -84,18 +88,18 @@ public class AnthropicProvider implements LlmProvider {
             return mapResponse(raw, model, start);
 
         } catch (WebClientResponseException e) {
-            log.error("Anthropic error: {} — {}", e.getStatusCode(), e.getResponseBodyAsString());
-            throw GatewayException.providerError("Anthropic", e.getStatusCode().is5xxServerError());
+            log.error("{} error: {} — {}", name, e.getStatusCode(), e.getResponseBodyAsString());
+            throw GatewayException.providerError(name, e.getStatusCode().is5xxServerError());
         } catch (Exception e) {
-            log.error("Anthropic call failed: {}", e.getMessage());
-            throw GatewayException.providerError("Anthropic", true); // timeouts and other transport errors are retryable
+            log.error("{} call failed: {}", name, e.getMessage());
+            throw GatewayException.providerError(name, true); // timeouts and other transport errors are retryable
         }
     }
 
     @Override
     public Flux<StreamChunk> streamChat(ChatRequest request, int maxTokens) {
         String model = request.getModel() != null ? request.getModel() : defaultModel;
-        log.info("Streaming from Anthropic — model={}", model);
+        log.info("Streaming from {} — model={}", name, model);
 
         Map<String, Object> body = requestBody(request, model, maxTokens, true);
         AtomicInteger inputTokens = new AtomicInteger(0);
@@ -134,16 +138,16 @@ public class AnthropicProvider implements LlmProvider {
                                 .totalTokens(inputTokens.get() + outputTokens)
                                 .build()));
                         }
-                        case "error" -> sink.error(GatewayException.providerError("Anthropic", true));
+                        case "error" -> sink.error(GatewayException.providerError(name, true));
                         default -> { /* content_block_start/stop, message_stop, ping — nothing to forward */ }
                     }
                 } catch (Exception e) {
-                    log.warn("Failed to parse Anthropic stream frame, skipping: {}", e.getMessage());
+                    log.warn("Failed to parse {} stream frame, skipping: {}", name, e.getMessage());
                 }
             })
             .onErrorMap(WebClientResponseException.class, e -> {
-                log.error("Anthropic stream error: {} — {}", e.getStatusCode(), e.getResponseBodyAsString());
-                return GatewayException.providerError("Anthropic", e.getStatusCode().is5xxServerError());
+                log.error("{} stream error: {} — {}", name, e.getStatusCode(), e.getResponseBodyAsString());
+                return GatewayException.providerError(name, e.getStatusCode().is5xxServerError());
             });
     }
 
@@ -182,13 +186,13 @@ public class AnthropicProvider implements LlmProvider {
         int prompt           = usage != null ? ((Number) usage.get("input_tokens")).intValue() : 0;
         int completion       = usage != null ? ((Number) usage.get("output_tokens")).intValue() : 0;
 
-        log.info("Anthropic responded — input={} output={} latency={}ms",
+        log.info("{} responded — input={} output={} latency={}ms", name,
             prompt, completion, System.currentTimeMillis() - start);
 
         return ChatResponse.builder()
             .requestId(UUID.randomUUID().toString())
             .content(text)
-            .provider("anthropic")
+            .provider(name)
             .model(model)
             .usage(ChatResponse.TokenUsage.builder()
                 .promptTokens(prompt)

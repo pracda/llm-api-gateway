@@ -55,22 +55,29 @@ app:
     expiration-ms: 86400000        # 24 hours
 
   llm:
-    openai:
-      api-key: ${OPENAI_API_KEY:}
-      default-model: gpt-4o-mini
-      allowed-models: gpt-4o-mini,gpt-4o,gpt-4-turbo,gpt-3.5-turbo
-      # Inter-signal timeout for streaming calls (resets on every token/element, not a
-      # single total-duration cap) — 120s tolerates slower analyses than the old 30s default.
-      timeout-seconds: 120
-    anthropic:
-      api-key: ${ANTHROPIC_API_KEY:}
-      base-url: https://api.anthropic.com
-      api-version: "2023-06-01"
-      # claude-3-haiku-20240307 (and its 2024-generation siblings) are retired and now
-      # return 404 from the Anthropic API — replaced with the current model lineup.
-      default-model: claude-haiku-4-5-20251001
-      allowed-models: claude-haiku-4-5-20251001,claude-sonnet-5,claude-opus-4-8
-      timeout-seconds: 120
+    # Provider registry (F3a) — adding a backend is config-only. `type: openai-compatible`
+    # covers OpenAI itself plus any OpenAI-format backend (Groq, OpenRouter, Together,
+    # Ollama, …); `type: anthropic` uses the dedicated Anthropic Messages provider.
+    # `timeout-seconds` is an inter-signal timeout for streaming (resets on every element,
+    # not a total-duration cap) — 120s tolerates slower analyses than the old 30s default.
+    providers:
+      openai:
+        type: openai-compatible
+        base-url: https://api.openai.com
+        api-key: ${OPENAI_API_KEY:}
+        default-model: gpt-4o-mini
+        allowed-models: [gpt-4o-mini, gpt-4o, gpt-4-turbo, gpt-3.5-turbo]
+        timeout-seconds: 120
+      anthropic:
+        type: anthropic
+        base-url: https://api.anthropic.com
+        api-version: "2023-06-01"
+        api-key: ${ANTHROPIC_API_KEY:}
+        # claude-3-haiku-20240307 (and its 2024-generation siblings) are retired and now
+        # return 404 from the Anthropic API — replaced with the current model lineup.
+        default-model: claude-haiku-4-5-20251001
+        allowed-models: [claude-haiku-4-5-20251001, claude-sonnet-5, claude-opus-4-8]
+        timeout-seconds: 120
     retry:
       max-retries: 2
       backoff-ms: 500

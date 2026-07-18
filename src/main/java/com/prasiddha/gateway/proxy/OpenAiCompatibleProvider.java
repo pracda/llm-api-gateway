@@ -2,17 +2,16 @@ package com.prasiddha.gateway.proxy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.prasiddha.gateway.config.ProvidersProperties.ProviderConfig;
 import com.prasiddha.gateway.exception.GatewayException;
 import com.prasiddha.gateway.model.request.ChatRequest;
 import com.prasiddha.gateway.model.response.ChatResponse;
 import com.prasiddha.gateway.service.CanaryTokenProvider;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
-import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Flux;
@@ -23,50 +22,59 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+/**
+ * Generic provider for any backend that speaks the OpenAI {@code /v1/chat/completions}
+ * wire format — OpenAI itself, plus Groq, OpenRouter, Together, Cerebras, Ollama, etc.
+ *
+ * <p>The only differences between such backends are the base URL, API key, and default
+ * model, all injected from an {@code app.llm.providers.<key>} entry (F3a). This class is
+ * NOT a Spring {@code @Component}; one instance per configured provider is built by
+ * {@code ProviderRegistrationConfig}.
+ */
 @Slf4j
-@Component
-public class OpenAiProvider implements LlmProvider {
+public class OpenAiCompatibleProvider implements LlmProvider {
 
-    private final WebClient webClient;
+    private final String name;
+    private final String chatUrl;
     private final String apiKey;
     private final String defaultModel;
     private final int timeoutSeconds;
+    private final WebClient webClient;
     private final CanaryTokenProvider canaryTokenProvider;
     private final ObjectMapper objectMapper;
 
-    public OpenAiProvider(
+    public OpenAiCompatibleProvider(
+        String name,
+        ProviderConfig cfg,
         WebClient webClient,
-        @Value("${app.llm.openai.api-key}") String apiKey,
-        @Value("${app.llm.openai.default-model}") String defaultModel,
-        @Value("${app.llm.openai.timeout-seconds}") int timeoutSeconds,
         CanaryTokenProvider canaryTokenProvider,
         ObjectMapper objectMapper
     ) {
+        this.name           = name;
+        this.chatUrl        = stripTrailingSlash(cfg.getBaseUrl()) + "/v1/chat/completions";
+        this.apiKey         = cfg.getApiKey();
+        this.defaultModel   = cfg.getDefaultModel();
+        this.timeoutSeconds = cfg.getTimeoutSeconds();
         this.webClient      = webClient;
-        this.apiKey         = apiKey;
-        this.defaultModel   = defaultModel;
-        this.timeoutSeconds = timeoutSeconds;
         this.canaryTokenProvider = canaryTokenProvider;
         this.objectMapper   = objectMapper;
     }
 
     @Override
-    public ChatRequest.LlmProvider getProvider() {
-        return ChatRequest.LlmProvider.OPENAI;
+    public String getProvider() {
+        return name;
     }
 
     @Override
     public ChatResponse chat(ChatRequest request, int maxTokens) {
         String model = request.getModel() != null ? request.getModel() : defaultModel;
         long start   = System.currentTimeMillis();
-        log.info("Calling OpenAI — model={}", model);
+        log.info("Calling {} — model={}", name, model);
 
         Map<String, Object> body = requestBody(request, model, maxTokens, false);
 
         try {
-            Map<?, ?> raw = webClient.post()
-                .uri("https://api.openai.com/v1/chat/completions")
-                .header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey)
+            Map<?, ?> raw = authorized(webClient.post().uri(chatUrl))
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .retrieve()
@@ -77,24 +85,22 @@ public class OpenAiProvider implements LlmProvider {
             return mapResponse(raw, model, start);
 
         } catch (WebClientResponseException e) {
-            log.error("OpenAI error: {} — {}", e.getStatusCode(), e.getResponseBodyAsString());
-            throw GatewayException.providerError("OpenAI", e.getStatusCode().is5xxServerError());
+            log.error("{} error: {} — {}", name, e.getStatusCode(), e.getResponseBodyAsString());
+            throw GatewayException.providerError(name, e.getStatusCode().is5xxServerError());
         } catch (Exception e) {
-            log.error("OpenAI call failed: {}", e.getMessage());
-            throw GatewayException.providerError("OpenAI", true); // timeouts and other transport errors are retryable
+            log.error("{} call failed: {}", name, e.getMessage());
+            throw GatewayException.providerError(name, true); // timeouts and other transport errors are retryable
         }
     }
 
     @Override
     public Flux<StreamChunk> streamChat(ChatRequest request, int maxTokens) {
         String model = request.getModel() != null ? request.getModel() : defaultModel;
-        log.info("Streaming from OpenAI — model={}", model);
+        log.info("Streaming from {} — model={}", name, model);
 
         Map<String, Object> body = requestBody(request, model, maxTokens, true);
 
-        return webClient.post()
-            .uri("https://api.openai.com/v1/chat/completions")
-            .header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey)
+        return authorized(webClient.post().uri(chatUrl))
             .contentType(MediaType.APPLICATION_JSON)
             .accept(MediaType.TEXT_EVENT_STREAM)
             .bodyValue(body)
@@ -103,9 +109,16 @@ public class OpenAiProvider implements LlmProvider {
             .timeout(Duration.ofSeconds(timeoutSeconds))
             .mapNotNull(this::toStreamChunk)
             .onErrorMap(WebClientResponseException.class, e -> {
-                log.error("OpenAI stream error: {} — {}", e.getStatusCode(), e.getResponseBodyAsString());
-                return GatewayException.providerError("OpenAI", e.getStatusCode().is5xxServerError());
+                log.error("{} stream error: {} — {}", name, e.getStatusCode(), e.getResponseBodyAsString());
+                return GatewayException.providerError(name, e.getStatusCode().is5xxServerError());
             });
+    }
+
+    /** Adds the bearer header only when a key is configured — Ollama and other local backends need none. */
+    private WebClient.RequestBodySpec authorized(WebClient.RequestBodySpec spec) {
+        return (apiKey == null || apiKey.isBlank())
+            ? spec
+            : spec.header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey);
     }
 
     /** null return means "skip this SSE frame" — e.g. the [DONE] sentinel or a content-free keep-alive. */
@@ -129,7 +142,7 @@ public class OpenAiProvider implements LlmProvider {
             String delta = node.path("choices").path(0).path("delta").path("content").asText(null);
             return delta != null ? StreamChunk.text(delta) : null;
         } catch (Exception e) {
-            log.warn("Failed to parse OpenAI stream frame, skipping: {}", e.getMessage());
+            log.warn("Failed to parse {} stream frame, skipping: {}", name, e.getMessage());
             return null;
         }
     }
@@ -178,13 +191,13 @@ public class OpenAiProvider implements LlmProvider {
         int prompt       = usage != null ? ((Number) usage.get("prompt_tokens")).intValue() : 0;
         int completion   = usage != null ? ((Number) usage.get("completion_tokens")).intValue() : 0;
 
-        log.info("OpenAI responded — prompt={} completion={} latency={}ms",
-            prompt, completion, System.currentTimeMillis() - start);
+        log.info("{} responded — prompt={} completion={} latency={}ms",
+            name, prompt, completion, System.currentTimeMillis() - start);
 
         return ChatResponse.builder()
             .requestId(UUID.randomUUID().toString())
             .content(content)
-            .provider("openai")
+            .provider(name)
             .model(model)
             .usage(ChatResponse.TokenUsage.builder()
                 .promptTokens(prompt)
@@ -193,5 +206,12 @@ public class OpenAiProvider implements LlmProvider {
                 .build())
             .latencyMs(System.currentTimeMillis() - start)
             .build();
+    }
+
+    private static String stripTrailingSlash(String url) {
+        if (url == null || url.isBlank()) {
+            throw new IllegalStateException("base-url is required for an openai-compatible provider");
+        }
+        return url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
     }
 }

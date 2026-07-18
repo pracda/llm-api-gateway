@@ -1,5 +1,7 @@
 package com.prasiddha.gateway.proxy;
 
+import com.prasiddha.gateway.config.ProvidersProperties;
+import com.prasiddha.gateway.config.ProvidersProperties.ProviderConfig;
 import com.prasiddha.gateway.exception.GatewayException;
 import com.prasiddha.gateway.model.request.ChatRequest;
 import com.prasiddha.gateway.model.response.ChatResponse;
@@ -10,24 +12,19 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.util.retry.Retry;
 
-import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 /**
- * Routes chat requests to the correct LLM provider.
- * All LlmProvider implementations are auto-discovered via Spring DI.
+ * Routes chat requests to the correct LLM provider, resolved by string key against the
+ * config-driven {@link ProviderRegistry} (F3a). Model allow-lists and per-provider defaults
+ * come from {@link ProvidersProperties}, so a new provider is reachable with no code change.
  */
 @Slf4j
 @Service
 public class LlmProxyService {
 
-    private final Map<ChatRequest.LlmProvider, LlmProvider> providers;
-    private final Set<String> openAiAllowedModels;
-    private final Set<String> anthropicAllowedModels;
+    private final ProviderRegistry providers;
+    private final ProvidersProperties providersProperties;
 
     @Value("${app.llm.retry.max-retries}")
     private int maxRetries;
@@ -38,22 +35,17 @@ public class LlmProxyService {
     @Value("${app.llm.retry.fallback-enabled}")
     private boolean fallbackEnabled;
 
-    public LlmProxyService(
-        List<LlmProvider> providerList,
-        @Value("${app.llm.openai.allowed-models}") String openAiAllowedModelsCsv,
-        @Value("${app.llm.anthropic.allowed-models}") String anthropicAllowedModelsCsv
-    ) {
-        this.providers = providerList.stream()
-            .collect(Collectors.toMap(LlmProvider::getProvider, Function.identity()));
-        this.openAiAllowedModels = toSet(openAiAllowedModelsCsv);
-        this.anthropicAllowedModels = toSet(anthropicAllowedModelsCsv);
-        log.info("LlmProxyService ready — providers: {}", providers.keySet());
+    public LlmProxyService(ProviderRegistry providers, ProvidersProperties providersProperties) {
+        this.providers = providers;
+        this.providersProperties = providersProperties;
+        log.info("LlmProxyService ready — providers: {}", providers.names());
     }
 
     public ChatResponse chat(ChatRequest request, int maxTokens) {
-        validateModel(request.getProvider(), request.getModel());
-        LlmProvider primary = resolve(request.getProvider());
-        log.info("Routing to: {}", request.getProvider());
+        String providerKey = request.providerKey();
+        validateModel(providerKey, request.getModel());
+        LlmProvider primary = resolve(providerKey);
+        log.info("Routing to: {}", providerKey);
 
         try {
             return attemptWithRetry(primary, request, maxTokens);
@@ -61,24 +53,25 @@ public class LlmProxyService {
             if (!e.isRetryable() || !fallbackEnabled) {
                 throw e;
             }
-            LlmProvider fallback = fallbackFor(request.getProvider());
+            LlmProvider fallback = fallbackFor(providerKey);
             if (fallback == null) {
                 throw e;
             }
             log.warn("Falling back from {} to {} after retryable failure: {}",
-                request.getProvider(), fallback.getProvider(), e.getMessage());
+                providerKey, fallback.getProvider(), e.getMessage());
             ChatResponse response = fallback.chat(request, maxTokens);
             return response.toBuilder()
-                .requestedProvider(request.getProvider().name())
+                .requestedProvider(providerKey)
                 .fellBack(true)
                 .build();
         }
     }
 
     public Flux<LlmProvider.StreamChunk> streamChat(ChatRequest request, int maxTokens) {
-        validateModel(request.getProvider(), request.getModel());
-        LlmProvider provider = resolve(request.getProvider());
-        log.info("Routing stream to: {}", request.getProvider());
+        String providerKey = request.providerKey();
+        validateModel(providerKey, request.getModel());
+        LlmProvider provider = resolve(providerKey);
+        log.info("Routing stream to: {}", providerKey);
 
         // Retry-before-first-chunk only — once a chunk has reached the subscriber, replaying
         // the stream (same or different provider) would look like a broken duplicate response
@@ -87,7 +80,13 @@ public class LlmProxyService {
             .retryWhen(Retry.max(maxRetries)
                 .filter(this::isRetryableGatewayException)
                 .doBeforeRetry(signal -> log.warn("Retrying {} stream after retryable failure (attempt {})",
-                    request.getProvider(), signal.totalRetries() + 1)));
+                    providerKey, signal.totalRetries() + 1)));
+    }
+
+    /** Provider default model, used by callers (e.g. streaming) that don't get a resolved model back. */
+    public String defaultModelFor(String providerKey) {
+        ProviderConfig cfg = providersProperties.get(providerKey);
+        return cfg != null ? cfg.getDefaultModel() : null;
     }
 
     private ChatResponse attemptWithRetry(LlmProvider provider, ChatRequest request, int maxTokens) {
@@ -120,35 +119,38 @@ public class LlmProxyService {
         }
     }
 
-    private LlmProvider fallbackFor(ChatRequest.LlmProvider requested) {
-        for (Map.Entry<ChatRequest.LlmProvider, LlmProvider> entry : providers.entrySet()) {
-            if (entry.getKey() != requested) {
-                return entry.getValue();
+    /**
+     * First configured provider that isn't the requested one. This "any other provider"
+     * heuristic is F3a's carry-over of the original two-provider behaviour; F6 replaces it
+     * with an ordered, error-class-driven fallback ladder.
+     */
+    private LlmProvider fallbackFor(String requestedKey) {
+        for (String name : providers.names()) {
+            if (!name.equalsIgnoreCase(requestedKey)) {
+                return providers.get(name);
             }
         }
         return null;
     }
 
-    private void validateModel(ChatRequest.LlmProvider provider, String model) {
+    private void validateModel(String providerKey, String model) {
         if (model == null) return; // null = use provider default, always allowed
-        Set<String> allowed = provider == ChatRequest.LlmProvider.OPENAI ? openAiAllowedModels : anthropicAllowedModels;
-        if (!allowed.contains(model)) {
-            throw GatewayException.invalidModel(model, provider.name());
+        ProviderConfig cfg = providersProperties.get(providerKey);
+        if (cfg == null) {
+            // Unknown provider — surface it as a routing error, not a model error.
+            throw new GatewayException("Unsupported provider: " + providerKey, HttpStatus.BAD_REQUEST);
+        }
+        List<String> allowed = cfg.getAllowedModels();
+        if (allowed == null || !allowed.contains(model)) {
+            throw GatewayException.invalidModel(model, providerKey);
         }
     }
 
-    private LlmProvider resolve(ChatRequest.LlmProvider requested) {
-        LlmProvider provider = providers.get(requested);
+    private LlmProvider resolve(String providerKey) {
+        LlmProvider provider = providers.get(providerKey);
         if (provider == null) {
-            throw new GatewayException("Unsupported provider: " + requested, HttpStatus.BAD_REQUEST);
+            throw new GatewayException("Unsupported provider: " + providerKey, HttpStatus.BAD_REQUEST);
         }
         return provider;
-    }
-
-    private static Set<String> toSet(String csv) {
-        return Arrays.stream(csv.split(","))
-            .map(String::trim)
-            .filter(s -> !s.isEmpty())
-            .collect(Collectors.toUnmodifiableSet());
     }
 }

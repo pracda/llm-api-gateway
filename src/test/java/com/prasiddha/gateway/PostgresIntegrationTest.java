@@ -63,12 +63,8 @@ class PostgresIntegrationTest {
         registry.add("app.rate-limit.requests-per-day", () -> 100000);
         registry.add("app.rate-limit.global-requests-per-minute", () -> 10000);
         registry.add("app.rate-limit.auth-requests-per-minute", () -> 1000);
-        registry.add("app.llm.openai.api-key", () -> "test-openai-key");
-        registry.add("app.llm.openai.allowed-models", () -> "gpt-4o-mini,gpt-4o");
-        registry.add("app.llm.anthropic.api-key", () -> "test-anthropic-key");
-        registry.add("app.llm.anthropic.base-url", () -> "https://api.anthropic.com");
-        registry.add("app.llm.anthropic.api-version", () -> "2023-06-01");
-        registry.add("app.llm.anthropic.allowed-models", () -> "claude-haiku-4-5-20251001");
+        // LLM provider registry (app.llm.providers.*) is supplied by the default application.yml;
+        // this test only exercises register/login, so no provider-key overrides are needed here.
     }
 
     @Autowired MockMvc mockMvc;

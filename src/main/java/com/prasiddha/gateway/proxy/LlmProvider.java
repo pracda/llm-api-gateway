@@ -6,10 +6,15 @@ import reactor.core.publisher.Flux;
 
 /**
  * Contract every LLM provider must implement.
- * Adding a new provider (e.g. Gemini) = implement this interface only.
+ *
+ * As of F3a, providers are identified by a lower-case string key (e.g. "openai",
+ * "anthropic", "groq", "ollama") rather than a fixed enum, so a new OpenAI-compatible
+ * backend can be added via configuration alone — see {@code app.llm.providers.*} and
+ * {@code ProviderRegistrationConfig}.
  */
 public interface LlmProvider {
-    ChatRequest.LlmProvider getProvider();
+    /** Lower-case provider key this instance serves (matches its {@code app.llm.providers.<key>} entry). */
+    String getProvider();
 
     /** maxTokens caps the completion length — enforces the caller's API key tier budget. */
     ChatResponse chat(ChatRequest request, int maxTokens);
