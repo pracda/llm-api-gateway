@@ -61,6 +61,7 @@ public class ChatController {
     private final ApiKeyService          apiKeyService;
     private final IntentClassificationService intentClassificationService;
     private final CostCalculationService costCalculationService;
+    private final RoutingService routingService;
     private final FallbackProperties fallbackProperties;
 
     /**
@@ -73,6 +74,29 @@ public class ChatController {
         boolean degrade = fallbackProperties.policyForTier(tier) == FallbackProperties.BudgetPolicy.DEGRADE_TO_FREE
             && llmProxy.hasFreeProvider();
         return degrade ? "daily_budget_exceeded" : null;
+    }
+
+    /**
+     * Smart routing (F3b): when the caller sent {@code "model":"auto"}, replaces the request's
+     * provider/model with the router's choice and returns the routing reason (else null). Skipped
+     * when the request is being budget-degraded to a free provider (that path ignores the model).
+     * With routing disabled, {@code "auto"} falls back to the requested provider's default.
+     */
+    private String applyAutoRouting(ChatRequest request, ApiKey apiKey, int jailbreakScore,
+                                    String apiKeyId, boolean budgetDegrading) {
+        if (budgetDegrading || !routingService.isAutoRequested(request.getModel())) {
+            return null;
+        }
+        if (!routingService.isEnabled()) {
+            request.setModel(null); // routing off → use the requested provider's default model
+            return null;
+        }
+        RoutingService.RoutingDecision decision = routingService.decide(
+            request, apiKey, jailbreakScore, apiKey.getDailyBudgetUsd(),
+            rateLimitService.getCurrentSpend(apiKeyId));
+        request.setProvider(decision.provider());
+        request.setModel(decision.model());
+        return decision.reason();
     }
 
     @PostMapping("/chat")
@@ -177,11 +201,18 @@ public class ChatController {
             request.setUserMessage(piiResult.content());
         }
 
+        // ── 2c. Smart routing (F3b): resolve "model":"auto" to a concrete provider/model ──
+        String routingReason = applyAutoRouting(
+            request, apiKey, inputResult.jailbreakScore(), apiKeyId, budgetDegradeReason != null);
+
         // ── 3. Real LLM call (token budget capped by the caller's API key tier) ──
         int maxTokens = apiKey.getMaxTokensPerRequest();
         ChatResponse llmResponse = budgetDegradeReason != null
             ? llmProxy.chatDegradedToFree(request, maxTokens, budgetDegradeReason)
             : llmProxy.chat(request, maxTokens);
+        if (routingReason != null) {
+            llmResponse = llmResponse.toBuilder().routed(true).routingReason(routingReason).build();
+        }
 
         // Cost is incurred by the provider call regardless of what the output scan decides below,
         // so it's computed and recorded here, once, and threaded into whichever audit log follows.
@@ -334,6 +365,9 @@ public class ChatController {
         if (piiResult.content() != null) {
             request.setUserMessage(piiResult.content());
         }
+
+        // ── 2c. Smart routing (F3b): resolve "model":"auto" before streaming ──
+        applyAutoRouting(request, apiKey, inputResult.jailbreakScore(), apiKeyId, budgetDegradeReason != null);
 
         // ── 3. Stream from the provider (token budget capped by the caller's API key tier) ──
         int maxTokens = apiKey.getMaxTokensPerRequest();

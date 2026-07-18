@@ -72,6 +72,14 @@ app:
       max-retries: 2
       backoff-ms: 10
       fallback-enabled: true
+    routing:
+      enabled: true
+      simple:  { provider: openai,    model: gpt-4o-mini }
+      complex: { provider: anthropic, model: claude-sonnet-5 }
+      complexity-char-threshold: 600
+      suspicious-score-threshold: 40
+      premium-tiers: [STANDARD, ENTERPRISE]
+      budget-floor-fraction: 0.15
     pricing:
       openai:
         gpt-4o-mini: { input-per-million: 0.15, output-per-million: 0.60 }

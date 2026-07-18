@@ -99,6 +99,15 @@ app:
       max-retries: 2
       backoff-ms: 500
       fallback-enabled: true   # master switch for cross-provider laddering (F3a/F6)
+    # ── Smart routing (F3b) — engaged only on requests sending "model": "auto" ──
+    routing:
+      enabled: true
+      simple:  { provider: openai,    model: gpt-4o-mini }      # cheap default for simple traffic
+      complex: { provider: anthropic, model: claude-sonnet-5 }  # premium for long/suspicious traffic
+      complexity-char-threshold: 600      # prompts >= this many chars route to `complex`
+      suspicious-score-threshold: 40      # jailbreak score >= this also routes to `complex`
+      premium-tiers: [STANDARD, ENTERPRISE]   # TRIAL is capped to `simple`
+      budget-floor-fraction: 0.15         # when <15% of the daily cap remains, force `simple`
     # ── Free-LLM graceful degradation (F6) ──
     fallback:
       # Ordered fallback ladder. Empty = provider-registry declaration order. Put paid providers

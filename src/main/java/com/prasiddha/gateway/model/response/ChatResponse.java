@@ -27,6 +27,10 @@ public class ChatResponse {
     private boolean degraded;
     /** Why degradation happened: "paid_quota_exhausted" | "daily_budget_exceeded". Null unless degraded. */
     private String fallbackReason;
+    /** True when the gateway chose the provider/model for a "model":"auto" request (F3b). */
+    private boolean routed;
+    /** Why the router picked this model: "simple_prompt" | "complex_prompt" | "elevated_risk" | "tier_capped" | "budget_floor". */
+    private String routingReason;
 
     @Data @Builder
     public static class TokenUsage {
