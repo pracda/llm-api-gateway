@@ -69,6 +69,12 @@ aws ec2 associate-iam-instance-profile --instance-id i-03a3f93f713ae172c \
 ```bash
 ssh -i deploy/aws/llm-gateway-key.pem ec2-user@3.81.99.148 "sudo bash -s" <<EOF
 set -e
+# Amazon Linux 2023 doesn't ship the AWS CLI — install v2 once (needed for the S3 upload).
+if ! command -v aws >/dev/null; then
+  dnf install -y unzip >/dev/null
+  curl -sfL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+  ( cd /tmp && unzip -oq awscliv2.zip && ./aws/install )
+fi
 install -m 0755 /opt/llm-gateway/deploy/aws/pg-backup.sh /usr/local/bin/pg-backup.sh
 cat >/etc/systemd/system/llm-gateway-backup.service <<UNIT
 [Unit]
