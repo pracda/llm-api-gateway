@@ -61,6 +61,11 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
+    <!-- Prometheus scrape endpoint (/actuator/prometheus) for standard metrics export (F5) -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
 
     <!-- ── JWT ───────────────────────────────────────────────────────── -->
     <dependency>

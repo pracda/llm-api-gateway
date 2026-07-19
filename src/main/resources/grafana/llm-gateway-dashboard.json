@@ -1,0 +1,112 @@
+{
+  "__comment": "Starter Grafana dashboard for the LLM API Gateway (F5). Import into Grafana with a Prometheus data source scraping /actuator/prometheus. Panels use the gateway.* meters emitted by GatewayMetrics.",
+  "title": "LLM API Gateway",
+  "schemaVersion": 39,
+  "editable": true,
+  "tags": ["llm-gateway"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request rate by outcome (req/s)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(gateway_requests_total[5m]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Block rate (%)",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } },
+      "targets": [
+        {
+          "expr": "100 * sum(rate(gateway_requests_total{outcome=~\"BLOCKED_.*\"}[5m])) / clamp_min(sum(rate(gateway_requests_total[5m])), 1)",
+          "legendFormat": "blocked"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Cumulative cost (USD) by provider",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+      "targets": [
+        {
+          "expr": "sum by (provider) (gateway_cost_usd_total)",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Provider latency p95 (ms)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "targets": [
+        {
+          "expr": "gateway_provider_latency{quantile=\"0.95\"}",
+          "legendFormat": "{{provider}} p95"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Cache hit ratio (%)",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } },
+      "targets": [
+        {
+          "expr": "100 * sum(rate(gateway_cache_lookups_total{result=\"hit\"}[5m])) / clamp_min(sum(rate(gateway_cache_lookups_total[5m])), 1)",
+          "legendFormat": "hit ratio"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Degrade / fallback rate (events/s)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "targets": [
+        { "expr": "sum(rate(gateway_degraded_total[5m]))", "legendFormat": "degraded" },
+        { "expr": "sum(rate(gateway_fallbacks_total[5m]))", "legendFormat": "fallback" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Jailbreak score p95",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 100 } },
+      "targets": [
+        { "expr": "gateway_jailbreak_score{quantile=\"0.95\"}", "legendFormat": "p95" }
+      ]
+    }
+  ]
+}

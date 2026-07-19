@@ -45,7 +45,8 @@ public class SecurityConfig {
                     "/admin-dashboard.html",
                     "/swagger-ui/**", "/swagger-ui.html",
                     "/api-docs/**",
-                    "/actuator/health"
+                    "/actuator/health",
+                    "/actuator/prometheus"   // F5: Prometheus scrape — restrict at the network layer in prod
                 ).permitAll()
                 // The gateway proxy itself requires an API key — a JWT alone is not enough here.
                 .requestMatchers("/api/v1/chat/**").hasAuthority(ApiKeyAuthFilter.API_KEY_AUTHORITY)

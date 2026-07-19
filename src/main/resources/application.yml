@@ -219,10 +219,13 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus   # F5: /actuator/prometheus for scraping
   endpoint:
     health:
       show-details: when-authorized
+  metrics:
+    tags:
+      application: llm-api-gateway
 
 # ── Swagger UI ────────────────────────────────────────────────────────────
 springdoc:

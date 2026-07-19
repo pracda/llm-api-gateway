@@ -64,6 +64,7 @@ public class ChatController {
     private final CostCalculationService costCalculationService;
     private final RoutingService routingService;
     private final ResponseCacheService cacheService;
+    private final GatewayMetrics metrics;
     private final FallbackProperties fallbackProperties;
 
     /** F4: abort a stream the moment a canary/secret appears, instead of only alerting post-delivery. */
@@ -225,6 +226,7 @@ public class ChatController {
             ? cacheService.scopeKey(apiKey.getOrganizationId(), apiKeyId) : null;
         if (cacheScopeKey != null) {
             Optional<ChatResponse> cached = cacheService.lookup(request, cacheScopeKey);
+            metrics.recordCache(cached.isPresent());
             if (cached.isPresent()) {
                 ChatResponse hit = cached.get().toBuilder().latencyMs(elapsed(start)).build();
                 int pTok = hit.getUsage() != null ? hit.getUsage().getPromptTokens() : 0;
@@ -247,6 +249,12 @@ public class ChatController {
             : llmProxy.chat(request, maxTokens);
         if (routingReason != null) {
             llmResponse = llmResponse.toBuilder().routed(true).routingReason(routingReason).build();
+        }
+        if (llmResponse.isDegraded()) {
+            metrics.recordDegraded(llmResponse.getFallbackReason());
+        }
+        if (llmResponse.isFellBack()) {
+            metrics.recordFallback();
         }
 
         // Cost is incurred by the provider call regardless of what the output scan decides below,

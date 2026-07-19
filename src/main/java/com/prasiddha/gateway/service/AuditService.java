@@ -25,9 +25,16 @@ public class AuditService {
 
     private final AuditLogRepository repository;
     private final RealtimeEventPublisher eventPublisher;
+    private final GatewayMetrics metrics;
 
     @Async("auditExecutor")
     public void log(AuditLog entry) {
+        // F5: emit Prometheus metrics from the single audit chokepoint — every outcome, one place.
+        try {
+            metrics.recordAudit(entry);
+        } catch (Exception e) {
+            log.debug("Metrics emission failed (ignoring): {}", e.getMessage());
+        }
         try {
             repository.save(entry);
             eventPublisher.publishAudit(entry);
