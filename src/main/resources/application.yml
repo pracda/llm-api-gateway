@@ -191,6 +191,10 @@ app:
       sanitisation-enabled: true
       block-on-unsafe-output: true      # false = log and strip only
       max-response-length: 10000        # chars — responses above this are truncated
+      # F4: abort a stream the moment a canary token or secret appears (across chunk boundaries),
+      # instead of only alerting after full delivery. Already-sent tokens can't be recalled, so
+      # this shrinks a leak rather than eliminating the first-N-token exposure.
+      stream-leak-abort: true
     canary-token: ${CANARY_TOKEN:}      # blank = a random one is generated at boot
     competitor-keywords: "ChatGPT,Google Gemini,Microsoft Copilot"
     # Slack-compatible incoming webhook for HIGH-severity alerts — blank disables it.

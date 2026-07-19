@@ -9,6 +9,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Scans and sanitises LLM output before returning it to clients.
@@ -43,7 +44,8 @@ public class OutputScanService {
 
     // ── Patterns that should BLOCK (dangerous — never return to client) ────
 
-    private static final List<Pattern> BLOCK_PATTERNS = List.of(
+    /** Dangerous content (XSS/SQL/shell) — post-delivery scan only. */
+    private static final List<Pattern> DANGEROUS_PATTERNS = List.of(
 
         // Script injection / XSS
         Pattern.compile("<script[^>]*>.*?</script>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL),
@@ -54,13 +56,21 @@ public class OutputScanService {
         Pattern.compile("(?i)(DROP TABLE|DELETE FROM|INSERT INTO|UNION SELECT|; ?--)"),
 
         // Shell command injection signals
-        Pattern.compile("(?i)(rm -rf|chmod 777|wget http|curl http.*\\| ?sh|/etc/passwd|/etc/shadow)"),
+        Pattern.compile("(?i)(rm -rf|chmod 777|wget http|curl http.*\\| ?sh|/etc/passwd|/etc/shadow)")
+    );
 
-        // API key / token patterns (common formats)
+    /**
+     * Secret / credential patterns — exact-ish and cheap to match, so these are also used for the
+     * mid-stream abort check (F4) in addition to the post-delivery scan.
+     */
+    private static final List<Pattern> SECRET_PATTERNS = List.of(
         Pattern.compile("sk-[a-zA-Z0-9]{40,}"),                             // OpenAI keys
         Pattern.compile("sk-ant-[a-zA-Z0-9\\-_]{80,}"),                     // Anthropic keys
         Pattern.compile("(?i)(api[_-]?key|bearer)[\"'\\s:=]+[a-zA-Z0-9\\-_]{20,}")
     );
+
+    private static final List<Pattern> BLOCK_PATTERNS =
+        Stream.concat(DANGEROUS_PATTERNS.stream(), SECRET_PATTERNS.stream()).toList();
 
     // ── Public API ────────────────────────────────────────────────────────
 
@@ -126,6 +136,31 @@ public class OutputScanService {
         return competitorMentioned
             ? ScanResult.safeWithCompetitorMention(sanitised)
             : ScanResult.safe(sanitised);
+    }
+
+    /** A canary/secret leak detected in a streamed response window (F4). */
+    public record StreamLeak(boolean promptLeak, String reason) {}
+
+    /**
+     * Lightweight, exact/secret-only leak check for the mid-stream abort path (F4): the canary
+     * token (a confirmed system-prompt leak) or a secret/credential pattern. Deliberately NOT the
+     * full scan (no PII/competitor/length) — those are cheap-per-chunk false-positive risks and are
+     * handled post-delivery. Returns null when the window is clean.
+     */
+    public StreamLeak findStreamingLeak(String window) {
+        if (window == null || window.isEmpty()) {
+            return null;
+        }
+        String canary = canaryTokenProvider.get();
+        if (canary != null && !canary.isBlank() && window.contains(canary)) {
+            return new StreamLeak(true, "canary token — system prompt leak");
+        }
+        for (Pattern pattern : SECRET_PATTERNS) {
+            if (pattern.matcher(window).find()) {
+                return new StreamLeak(false, "secret/credential pattern (" + describePattern(pattern) + ")");
+            }
+        }
+        return null;
     }
 
     private List<String> competitorKeywords() {

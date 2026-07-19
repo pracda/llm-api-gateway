@@ -66,6 +66,19 @@ public class ChatController {
     private final ResponseCacheService cacheService;
     private final FallbackProperties fallbackProperties;
 
+    /** F4: abort a stream the moment a canary/secret appears, instead of only alerting post-delivery. */
+    @org.springframework.beans.factory.annotation.Value("${app.security.output.stream-leak-abort:true}")
+    private boolean streamLeakAbortEnabled;
+
+    /** Carries a mid-stream leak from the scanning operator to the subscribe error handler (F4). */
+    private static final class StreamLeakException extends RuntimeException {
+        final transient OutputScanService.StreamLeak leak;
+        StreamLeakException(OutputScanService.StreamLeak leak) {
+            super("mid-stream leak: " + leak.reason());
+            this.leak = leak;
+        }
+    }
+
     /**
      * Whether a budget-exhausted request for this key should degrade to a free provider (F6)
      * instead of returning 402 — driven by the tier policy and gated on a free provider
@@ -418,6 +431,25 @@ public class ChatController {
         var stream = budgetDegradeReason != null
             ? llmProxy.streamDegradedToFree(request, maxTokens, servedProvider)
             : llmProxy.streamChat(request, maxTokens, servedProvider);
+
+        // ── 3b. Mid-stream leak defence (F4): abort BEFORE forwarding a chunk that completes a
+        // canary/secret leak (caught even across chunk boundaries via a sliding overlap buffer). ──
+        if (streamLeakAbortEnabled) {
+            StreamLeakScanner leakScanner = new StreamLeakScanner(outputScan);
+            stream = stream.handle((chunk, sink) -> {
+                if (chunk.textDelta() != null) {
+                    OutputScanService.StreamLeak leak = leakScanner.inspect(chunk.textDelta());
+                    if (leak != null) {
+                        log.error("STREAM ABORT — {} in output to '{}' (key {}) — withholding remainder + revoking",
+                            leak.reason(), username, apiKeyId);
+                        sink.error(new StreamLeakException(leak));
+                        return;
+                    }
+                }
+                sink.next(chunk);
+            });
+        }
+
         stream.subscribe(
             chunk -> {
                 try {
@@ -433,6 +465,29 @@ public class ChatController {
                 }
             },
             error -> {
+                // F4: a mid-stream canary/secret leak — abort delivery, revoke the key, raise an
+                // immediate high-severity alert. The remainder was never sent to the client.
+                if (error instanceof StreamLeakException leakError) {
+                    try {
+                        emitter.send(SseEmitter.event().data("[GATEWAY_ABORTED: response withheld by security policy]"));
+                        emitter.send(SseEmitter.event().data("[DONE]"));
+                    } catch (IOException | IllegalStateException ignored) {
+                        // client already gone — nothing more to send
+                    }
+                    if (apiKeyId != null) {
+                        apiKeyService.revoke(apiKeyId);
+                    }
+                    threatDetectionService.recordEvent(username, SecurityAlert.Type.REPEATED_OUTPUT_BLOCK);
+                    threatDetectionService.raiseImmediateAlert(username, SecurityAlert.Type.PROMPT_LEAK_DETECTED,
+                        "Mid-stream leak (" + leakError.leak.reason() + ") to '" + username
+                            + "' — stream aborted and API key " + apiKeyId + " auto-revoked");
+                    auditService.log(buildAudit(username, request, apiKeyId, ip, jailbreakScore,
+                        AuditLog.Outcome.BLOCKED_OUTPUT_UNSAFE, "Mid-stream leak: " + leakError.leak.reason(),
+                        0, 0, elapsed(start), 200, true, false, threatDetectionService.isLocked(username), true));
+                    emitter.complete();
+                    return;
+                }
+
                 log.error("Chat stream error for user='{}': {}", username, error.getMessage());
                 try {
                     // In-band error marker — a fixed, unambiguous prefix so it can't be mistaken
