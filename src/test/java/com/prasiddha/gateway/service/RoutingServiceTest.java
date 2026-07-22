@@ -2,14 +2,20 @@ package com.prasiddha.gateway.service;
 
 import com.prasiddha.gateway.config.RoutingProperties;
 import com.prasiddha.gateway.config.RoutingProperties.ModelRef;
+import com.prasiddha.gateway.exception.GatewayException;
 import com.prasiddha.gateway.model.entity.ApiKey;
 import com.prasiddha.gateway.model.request.ChatRequest;
 import com.prasiddha.gateway.service.RoutingService.RoutingDecision;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * F3b — smart routing picks (provider, model) for "model":"auto" requests from prompt size
@@ -36,6 +42,19 @@ class RoutingServiceTest {
 
     private static ApiKey key(ApiKey.Tier tier, Double dailyBudgetUsd) {
         return ApiKey.builder().tier(tier).dailyBudgetUsd(dailyBudgetUsd).build();
+    }
+
+    /** Service with task profiles (general/coding/reasoning) for the task-routing tests. */
+    private static RoutingService serviceWithProfiles() {
+        var props = new RoutingProperties();
+        props.setSimple(ref("openai", "gpt-4o-mini"));
+        props.setComplex(ref("anthropic", "claude-sonnet-5"));
+        Map<String, ModelRef> profiles = new LinkedHashMap<>();
+        profiles.put("general", ref("openai", "gpt-4o-mini"));
+        profiles.put("coding", ref("anthropic", "claude-sonnet-5"));
+        profiles.put("reasoning", ref("deepseek", "deepseek-reasoner"));
+        props.setProfiles(profiles);
+        return new RoutingService(props);
     }
 
     private static ChatRequest autoRequest(int promptChars) {
@@ -113,6 +132,39 @@ class RoutingServiceTest {
             RoutingDecision d = service().decide(autoRequest(800), key(ApiKey.Tier.STANDARD, 10.0), 0, 10.0, 1.0);
             assertThat(d.model()).isEqualTo("claude-sonnet-5");
             assertThat(d.reason()).isEqualTo("complex_prompt");
+        }
+    }
+
+    @Nested
+    @DisplayName("Task routing (caller-declared)")
+    class TaskRouting {
+
+        @Test void knownTaskRoutesToItsProfile() {
+            RoutingDecision d = serviceWithProfiles().decideByTask("coding");
+            assertThat(d.provider()).isEqualTo("anthropic");
+            assertThat(d.model()).isEqualTo("claude-sonnet-5");
+            assertThat(d.reason()).isEqualTo("task:coding");
+        }
+
+        @Test void taskCanTargetAnAddedProviderLikeDeepseek() {
+            RoutingDecision d = serviceWithProfiles().decideByTask("reasoning");
+            assertThat(d.provider()).isEqualTo("deepseek");
+            assertThat(d.model()).isEqualTo("deepseek-reasoner");
+        }
+
+        @Test void unknownTaskIsRejectedWith400ListingValidTasks() {
+            assertThatThrownBy(() -> serviceWithProfiles().decideByTask("smuggling"))
+                .isInstanceOf(GatewayException.class)
+                .satisfies(e -> {
+                    assertThat(((GatewayException) e).getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(e.getMessage()).contains("coding"); // lists configured tasks
+                });
+        }
+
+        @Test void hasTaskProfilesReflectsConfiguration() {
+            assertThat(serviceWithProfiles().hasTaskProfiles()).isTrue();
+            assertThat(serviceWithProfiles().configuredTasks()).contains("general", "coding", "reasoning");
+            assertThat(service().hasTaskProfiles()).isFalse(); // no profiles configured
         }
     }
 }

@@ -98,9 +98,20 @@ public class ChatController {
      * when the request is being budget-degraded to a free provider (that path ignores the model).
      * With routing disabled, {@code "auto"} falls back to the requested provider's default.
      */
-    private String applyAutoRouting(ChatRequest request, ApiKey apiKey, int jailbreakScore,
-                                    String apiKeyId, boolean budgetDegrading) {
-        if (budgetDegrading || !routingService.isAutoRequested(request.getModel())) {
+    private String applyRouting(ChatRequest request, ApiKey apiKey, int jailbreakScore,
+                                String apiKeyId, boolean budgetDegrading) {
+        if (budgetDegrading) {
+            return null; // F6 is already sending this to a free provider, regardless of routing
+        }
+        // 1. Task routing (caller-declared intent) takes precedence over everything.
+        if (request.taskKey() != null && routingService.hasTaskProfiles()) {
+            RoutingService.RoutingDecision decision = routingService.decideByTask(request.taskKey());
+            request.setProvider(decision.provider());
+            request.setModel(decision.model());
+            return decision.reason();
+        }
+        // 2. Complexity-based auto routing (F3b) when model:"auto".
+        if (!routingService.isAutoRequested(request.getModel())) {
             return null;
         }
         if (!routingService.isEnabled()) {
@@ -217,8 +228,8 @@ public class ChatController {
             request.setUserMessage(piiResult.content());
         }
 
-        // ── 2c. Smart routing (F3b): resolve "model":"auto" to a concrete provider/model ──
-        String routingReason = applyAutoRouting(
+        // ── 2c. Smart routing (F3b): resolve "task" / "model":"auto" to a concrete provider/model ──
+        String routingReason = applyRouting(
             request, apiKey, inputResult.jailbreakScore(), apiKeyId, budgetDegradeReason != null);
 
         // ── 2d. Response cache (F2): serve identical/near-identical prompts at $0, no provider call ──
@@ -418,8 +429,8 @@ public class ChatController {
             request.setUserMessage(piiResult.content());
         }
 
-        // ── 2c. Smart routing (F3b): resolve "model":"auto" before streaming ──
-        applyAutoRouting(request, apiKey, inputResult.jailbreakScore(), apiKeyId, budgetDegradeReason != null);
+        // ── 2c. Smart routing (F3b): resolve "task" / "model":"auto" before streaming ──
+        applyRouting(request, apiKey, inputResult.jailbreakScore(), apiKeyId, budgetDegradeReason != null);
 
         // ── 3. Stream from the provider (token budget capped by the caller's API key tier) ──
         int maxTokens = apiKey.getMaxTokensPerRequest();

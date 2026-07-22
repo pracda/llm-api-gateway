@@ -80,6 +80,10 @@ app:
       suspicious-score-threshold: 40
       premium-tiers: [STANDARD, ENTERPRISE]
       budget-floor-fraction: 0.15
+      profiles:
+        general:   { provider: openai,    model: gpt-4o-mini }
+        reasoning: { provider: anthropic, model: claude-opus-4-8 }
+        coding:    { provider: anthropic, model: claude-sonnet-5 }
     pricing:
       openai:
         gpt-4o-mini: { input-per-million: 0.15, output-per-million: 0.60 }

@@ -95,11 +95,24 @@ app:
       #   default-model: llama3.1
       #   allowed-models: [llama3.1]
       #   free: true
+      # ── Extra text providers (OpenAI-compatible; set the key + uncomment to enable) ──
+      # deepseek:                                # strong reasoning/coding, cheap
+      #   type: openai-compatible
+      #   base-url: https://api.deepseek.com     # provider appends /v1/chat/completions
+      #   api-key: ${DEEPSEEK_API_KEY:}
+      #   default-model: deepseek-chat
+      #   allowed-models: [deepseek-chat, deepseek-reasoner]
+      # kimi:                                    # Moonshot — long context
+      #   type: openai-compatible
+      #   base-url: https://api.moonshot.ai      # NOT /v1 — provider appends /v1/chat/completions
+      #   api-key: ${MOONSHOT_API_KEY:}
+      #   default-model: moonshot-v1-32k
+      #   allowed-models: [moonshot-v1-8k, moonshot-v1-32k, moonshot-v1-128k]
     retry:
       max-retries: 2
       backoff-ms: 500
       fallback-enabled: true   # master switch for cross-provider laddering (F3a/F6)
-    # ── Smart routing (F3b) — engaged only on requests sending "model": "auto" ──
+    # ── Smart routing (F3b) — "task" (declared) or "model":"auto" (inferred) ──
     routing:
       enabled: true
       simple:  { provider: openai,    model: gpt-4o-mini }      # cheap default for simple traffic
@@ -108,6 +121,15 @@ app:
       suspicious-score-threshold: 40      # jailbreak score >= this also routes to `complex`
       premium-tiers: [STANDARD, ENTERPRISE]   # TRIAL is capped to `simple`
       budget-floor-fraction: 0.15         # when <15% of the daily cap remains, force `simple`
+      # Task routing: a request's "task":"<name>" is routed to the matching profile. Defaults use
+      # the two always-on providers; point reasoning/coding at deepseek/kimi once their keys are set.
+      profiles:
+        general:      { provider: openai,    model: gpt-4o-mini }
+        reasoning:    { provider: anthropic, model: claude-opus-4-8 }
+        research:     { provider: anthropic, model: claude-opus-4-8 }
+        coding:       { provider: anthropic, model: claude-sonnet-5 }
+        # long-context: { provider: kimi,     model: moonshot-v1-128k }   # needs MOONSHOT_API_KEY
+        # reasoning:    { provider: deepseek, model: deepseek-reasoner }   # needs DEEPSEEK_API_KEY
     # ── Shared embeddings source (F1 semantic detection; later F2 semantic cache) ──
     # Any OpenAI-compatible /v1/embeddings endpoint. Point base-url at a local Ollama
     # (http://localhost:11434, model nomic-embed-text) for a self-contained $0 setup.

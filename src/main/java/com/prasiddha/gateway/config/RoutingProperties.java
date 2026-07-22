@@ -4,15 +4,19 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
- * Smart-routing policy (F3b) — {@code app.llm.routing.*}. Engaged only when a chat request
- * sends {@code "model": "auto"}; explicit model choices are always honoured.
- *
- * <p>The router picks between a cheap {@code simple} model and a premium {@code complex} one
- * using signals the gateway already computes (prompt size, jailbreak score), then applies a
- * tier cap and a remaining-budget floor. All thresholds are config so operators tune policy
+ * Smart-routing policy (F3b) — {@code app.llm.routing.*}. Two forms:
+ * <ul>
+ *   <li><b>Task routing:</b> a request's {@code "task"} label is mapped to a {@code profiles.<task>}
+ *       (provider, model) — deterministic, caller-declared orchestration (coding, reasoning, …).</li>
+ *   <li><b>Complexity routing:</b> {@code "model":"auto"} picks between {@code simple} and
+ *       {@code complex} from prompt size / jailbreak score, with a tier cap and budget floor.</li>
+ * </ul>
+ * All targets are config, so operators tune the policy — and add providers like DeepSeek/Kimi —
  * without code changes.
  */
 @Data
@@ -20,8 +24,11 @@ import java.util.List;
 @ConfigurationProperties(prefix = "app.llm.routing")
 public class RoutingProperties {
 
-    /** Master switch. When off, {@code "model": "auto"} falls back to the requested provider's default. */
+    /** Master switch. When off, {@code "model":"auto"} and {@code task} fall back to the requested provider. */
     private boolean enabled = true;
+
+    /** Task label → (provider, model). Caller sends {@code "task":"<name>"} to route here. */
+    private Map<String, ModelRef> profiles = new LinkedHashMap<>();
 
     /** Cheap/default target for simple traffic. */
     private ModelRef simple;

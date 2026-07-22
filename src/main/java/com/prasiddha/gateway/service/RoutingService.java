@@ -2,11 +2,15 @@ package com.prasiddha.gateway.service;
 
 import com.prasiddha.gateway.config.RoutingProperties;
 import com.prasiddha.gateway.config.RoutingProperties.ModelRef;
+import com.prasiddha.gateway.exception.GatewayException;
 import com.prasiddha.gateway.model.entity.ApiKey;
 import com.prasiddha.gateway.model.request.ChatRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+
+import java.util.Set;
 
 /**
  * Smart routing (F3b): when a caller sends {@code "model": "auto"}, chooses a concrete
@@ -33,6 +37,33 @@ public class RoutingService {
     /** True when routing is switched on and both model tiers are configured. */
     public boolean isEnabled() {
         return props.isEnabled() && isComplete(props.getSimple()) && isComplete(props.getComplex());
+    }
+
+    /** True when task routing is available (enabled + at least one profile configured). */
+    public boolean hasTaskProfiles() {
+        return props.isEnabled() && props.getProfiles() != null && !props.getProfiles().isEmpty();
+    }
+
+    /** Configured task labels, for discovery and error messages. */
+    public Set<String> configuredTasks() {
+        return props.getProfiles() == null ? Set.of() : props.getProfiles().keySet();
+    }
+
+    /**
+     * Routes a caller-declared task label (e.g. "coding", "reasoning") to its configured profile.
+     * A task that isn't configured is a clean 400 listing the valid options.
+     */
+    public RoutingDecision decideByTask(String taskKey) {
+        ModelRef target = props.getProfiles() == null ? null : props.getProfiles().get(taskKey);
+        if (!isComplete(target)) {
+            throw new GatewayException(
+                "Unknown task '" + taskKey + "'. Configured tasks: " + configuredTasks(),
+                HttpStatus.BAD_REQUEST);
+        }
+        RoutingDecision decision = new RoutingDecision(
+            target.getProvider().trim().toLowerCase(), target.getModel(), "task:" + taskKey);
+        log.info("Task-routed '{}' to {}/{}", taskKey, decision.provider(), decision.model());
+        return decision;
     }
 
     /**
